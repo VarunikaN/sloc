@@ -42,4 +42,16 @@ ILSVRC2012_val_00040154.JPEG
 
 (A list of all images can be generated with `find . -name '*.JPEG' | xargs -l basename `)
 
+### If you use this codebase please cite:
+```
+@InProceedings{Haddad_2025_ICCV,
+    author    = {Haddad, Ziv Weiss and Barkan, Oren and Elisha, Yehonatan and Koenigstein, Noam},
+    title     = {Soft Local Completeness: Rethinking Completeness in XAI},
+    booktitle = {Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV)},
+    month     = {October},
+    year      = {2025},
+    pages     = {19794-19804}
+}
+```
+
 
