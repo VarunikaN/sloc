@@ -45,14 +45,6 @@ class ModelEnv:
         model = model.to(dev)
         return model
 
-    
-        else:
-            assert False, "unexpected arch"
-        
-        model.eval()        
-        model = model.to(dev)
-        return model
-
     def narrow_model(self, catidx, with_softmax=False):
         if "voc" in self.arch:
             modules = (
