@@ -154,14 +154,12 @@ def main():
     else: 
         creator = AutoProbSlocExplanationCreator(**config)
 
-    # 4. Dataset Loading
     if args.dataset == 'rsna':
         RSNA_ROOT = "/kaggle/input/rsna-pneumonia-detection-challenge"
         source = RSNASource(RSNA_ROOT)
         all_images = list(source.get_all_images().values())
     else:
         VOC_ROOT = "/kaggle/input/pascalvoc/VOCdevkit/VOC2012"
-        # Using the val.txt split for 100% paper match
         all_images = get_voc_val_images(VOC_ROOT) 
     
     # 5. Sampling and Resume Logic
@@ -197,6 +195,7 @@ def main():
             # Handle RSNA DICOM vs VOC JPEG
             if args.dataset == 'rsna':
                 img_pil = load_rsna_as_pil(info.path)
+                # Manually apply model transform since me.get_image_ext is for JPEGs
                 inp = me.get_transform()(img_pil).unsqueeze(0).to(me.device)
             else:
                 img_pil, inp = me.get_image_ext(info.path)

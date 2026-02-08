@@ -9,17 +9,18 @@ import atexit
 import pydicom
 import pandas as pd
 
+import pydicom
+
 class RSNASource:
     def __init__(self, base_path):
         self.base_path = base_path
-        # Standard Kaggle RSNA paths
         self.image_dir = os.path.join(base_path, 'stage_2_train_images')
         self.csv_path = os.path.join(base_path, 'stage_2_train_labels.csv')
 
-    @lru_cache(maxsize=None)
     def get_all_images(self):
+        # ImageInfo is the dataclass from your existing dataset.py
         df = pd.read_csv(self.csv_path)
-        # Drop duplicates as CSV has rows per bounding box; we just need patientId
+        # Drop duplicates as CSV has rows per bounding box
         df = df.drop_duplicates(subset=['patientId'])
         
         images = {}
@@ -29,17 +30,18 @@ class RSNASource:
             if os.path.exists(path):
                 # Target 1 for Pneumonia, 0 for Normal
                 target = int(row['Target'])
+                # We wrap it in your existing ImageInfo structure
                 images[p_id] = ImageInfo(path=path, name=p_id, target=target, desc="rsna")
         return images
 
 def load_rsna_as_pil(path):
-    """Helper to convert DICOM to RGB PIL Image for the ModelEnv."""
+    """Specific loader for RSNA DICOM files to 3-channel RGB PIL."""
     ds = pydicom.dcmread(path)
-    img_array = ds.pixel_array.astype(float)
-    # Rescale to 0-255
-    img_array = (np.maximum(img_array, 0) / img_array.max()) * 255.0
-    # Convert to 3-channel RGB so ImageNet models don't crash
-    return Image.fromarray(img_array.astype(np.uint8)).convert('RGB')
+    img = ds.pixel_array.astype(float)
+    # Normalize to 0-255 range
+    img = (np.maximum(img, 0) / img.max()) * 255.0
+    # Convert grayscale to RGB so ViT/ResNet models can process it
+    return Image.fromarray(img.astype(np.uint8)).convert('RGB')
     
 @dataclass
 class ImageInfo:
