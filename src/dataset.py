@@ -10,36 +10,55 @@ import pydicom
 import pandas as pd
 import numpy as np
 
-class RSNASource:
+class RSNABoneAgeSource:
     def __init__(self, base_path):
         self.base_path = base_path
-        self.image_dir = os.path.join(base_path, 'stage_2_train_images')
-        self.csv_path = os.path.join(base_path, 'stage_2_train_labels.csv')
+        self.image_dir = os.path.join(base_path, 'training-dataset')
+        self.csv_path = os.path.join(base_path, 'train.csv')
 
     def get_all_images(self):
-        # Uses the ImageInfo dataclass already in your project
         df = pd.read_csv(self.csv_path)
-        # Drop duplicates since the CSV has one entry per bounding box
-        df = df.drop_duplicates(subset=['patientId'])
-        
         images = {}
         for _, row in df.iterrows():
-            p_id = row['patientId']
-            path = os.path.join(self.image_dir, f"{p_id}.dcm")
+            img_id = str(row['id'])
+            path = os.path.join(self.image_dir, f"{img_id}.png")
             if os.path.exists(path):
-                # Target 1: Pneumonia, 0: Normal
-                target = int(row['Target'])
-                images[p_id] = ImageInfo(path=path, name=p_id, target=target, desc="rsna")
+                # target is boneage in months
+                images[img_id] = ImageInfo(
+                    path=path, 
+                    name=img_id, 
+                    target=int(row['boneage']), 
+                    desc="male" if row['male'] else "female"
+                )
         return images
 
-def load_rsna_as_pil(path):
-    """Converts 1-channel DICOM to 3-channel RGB PIL for ViT compatibility."""
-    ds = pydicom.dcmread(path)
-    img = ds.pixel_array.astype(float)
-    # Standard Min-Max Normalization
-    img = (np.maximum(img, 0) / img.max()) * 255.0
-    # Convert to RGB so ImageNet-pretrained ViT can accept the input shape
-    return Image.fromarray(img.astype(np.uint8)).convert('RGB')
+# class RSNASource:
+#     def __init__(self, base_path):
+#         self.base_path = base_path
+#         self.image_dir = os.path.join(base_path, 'stage_2_train_images')
+#         self.csv_path = os.path.join(base_path, 'stage_2_train_labels.csv')
+
+#     def get_all_images(self):
+#         # Uses the ImageInfo dataclass already in your project
+#         df = pd.read_csv(self.csv_path)
+#         # Drop duplicates since the CSV has one entry per bounding box
+#         df = df.drop_duplicates(subset=['patientId'])
+        
+#         images = {}
+#         for _, row in df.iterrows():
+#             p_id = row['patientId']
+#             path = os.path.join(self.image_dir, f"{p_id}.dcm")
+#             if os.path.exists(path):
+#                 # Target 1: Pneumonia, 0: Normal
+#                 target = int(row['Target'])
+#                 images[p_id] = ImageInfo(path=path, name=p_id, target=target, desc="rsna")
+#         return images
+
+def load_boneage_as_pil(path):
+    """Loads Bone Age PNG/JPG and ensures 3-channel RGB format."""
+    # Bone Age images are often grayscale PNGs
+    img = Image.open(path).convert('RGB')
+    return img
 
 @dataclass
 class ImageInfo:

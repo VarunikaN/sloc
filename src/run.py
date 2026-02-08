@@ -41,6 +41,28 @@ def save_visual_result(img_pil, sal_tensor, filename):
     ax[2].imshow(img_resized); ax[2].imshow(sal_norm, cmap='jet', alpha=0.5); ax[2].set_title("Overlay"); ax[2].axis('off')
     plt.savefig(filename); plt.close(fig)
 
+class EpochLogger:
+    def __init__(self, model_name, dataset_name):
+        self.filename = f"epoch_logs_{model_name}_{dataset_name}.csv"
+        self.data = []
+
+    def log(self, image_id, epoch, total_loss, comp_loss, tv_loss, mag_loss):
+        self.data.append({
+            'ImageID': image_id,
+            'Epoch': epoch,
+            'TotalLoss': total_loss,
+            'CompLoss': comp_loss,
+            'TVLoss': tv_loss,
+            'MagLoss': mag_loss
+        })
+
+    def save_to_disk(self):
+        df = pd.DataFrame(self.data)
+        # Append if exists, otherwise write header
+        df.to_csv(self.filename, mode='a', header=not os.path.exists(self.filename), index=False)
+        self.data = [] # Clear memory after save
+
+      
 # --- 1. Metric Evaluator (All 8 Metrics) ---
 class SLOCPaperEvaluator:
     def __init__(self, model, device):
@@ -107,35 +129,53 @@ class SLOCPaperEvaluator:
 
 # --- 2. SLOC_m Creator (Monitoring IDD) ---
 class SlocM_Creator(SlocExplanationCreator):
-    def explain(self, me, inp, catidx):
+    def explain(self, me, inp, catidx, image_id="unknown"):
+        # Initialize logger for this specific run
+        self.epoch_logger = EpochLogger(me.arch, "rsna_boneage")
+        
         data = self.generate_data(me, inp, catidx)
         initial = (torch.randn(me.shape[0], me.shape[1]) * 0.2 + 3).to(me.device)
-        evaluator = SLOCPaperEvaluator(me.model, me.device)
-        state = {'best_idd': -float('inf'), 'best_sal': None}
-        mexp = MaskedExplanationSum(initial_value=initial, H=me.shape[0], W=me.shape[1]).to(me.device)
-        optimizer = optim.Adam(mexp.parameters(), lr=0.1); tv = TotalVariationLoss()
-        C_TV = 0.05; C_MAG = 0.01
+        
+        # Pass the image_id down to the optimizer
+        final_explanation = self.optimize_with_logs(
+            me, inp, initial, data, image_id, catidx
+        )
+        
+        self.epoch_logger.save_to_disk()
+        return final_explanation
 
+    def optimize_with_logs(self, me, inp, initial, data, image_id, catidx):
+        mexp = MaskedExplanationSum(initial_value=initial, H=me.shape[0], W=me.shape[1]).to(me.device)
+        optimizer = optim.Adam(mexp.parameters(), lr=0.1)
+        tv = TotalVariationLoss()
+        
         for epoch in range(501):
             optimizer.zero_grad()
-            output = mexp(data.all_masks); loss = ((output - data.all_pred)**2).mean() + C_TV * tv(mexp.explanation) + C_MAG * mexp.explanation.abs().mean()
-            loss.backward(); optimizer.step()
+            output = mexp(data.all_masks)
+            
+            comp_loss = ((output - data.all_pred) ** 2).mean()
+            tv_loss = 0.1 * tv(mexp.explanation)
+            mag_loss = 0.01 * mexp.explanation.abs().mean()
+            
+            total_loss = comp_loss + tv_loss + mag_loss
+            total_loss.backward()
+            optimizer.step()
 
-            if epoch % 50 == 0:
-                cur_sal = np.ascontiguousarray(mexp.explanation.detach().cpu().numpy())
-                metrics = evaluator.run(inp, cur_sal, catidx, steps=10)
-                current_idd = metrics["IDD"]
-                if current_idd > state['best_idd']:
-                    state['best_idd'] = current_idd; state['best_sal'] = cur_sal.copy()
-                    
-        return state['best_sal']
+            # Log every 100 epochs or as needed
+            if epoch % 100 == 0 or epoch == 500:
+                self.epoch_logger.log(
+                    image_id, epoch, 
+                    total_loss.item(), comp_loss.item(), 
+                    tv_loss.item(), mag_loss.item()
+                )
+        return mexp.explanation.detach().cpu().numpy()
 
 # --- 3. Main Execution Block ---
 def main():
-    parser = argparse.ArgumentParser(description="Run SLOC Benchmark with RSNA/VOC support.")
+    parser = argparse.ArgumentParser(description="Run SLOC Benchmark with RSNA Bone Age Support.")
     parser.add_argument('--variant', type=str, default='SLOC_m', choices=['SLOC', 'SLOC_xp', 'SLOC_m'])
-    parser.add_argument('--model', type=str, default='resnet50', help="resnet50 or vit_base_patch16_224")
-    parser.add_argument('--dataset', type=str, default='voc', choices=['voc', 'rsna'])
+    parser.add_argument('--model', type=str, default='resnet50', help="resnet50, vit_base_patch16_224, etc.")
+    parser.add_argument('--dataset', type=str, default='rsna_boneage', choices=['voc', 'rsna_boneage'])
     parser.add_argument('--num_images', type=int, default=1000)
     parser.add_argument('--resume', action='store_true', help="Skip images already present in results CSV")
     
@@ -146,8 +186,9 @@ def main():
     print(f"GPU CHECK: Model {args.model} is running on: {me.device}")
     
     # 2. Paper Calibration (Section 4.1)
-    # ViT density p=0.3, CNN density p=0.6 (Paper standard)
-    p = 0.3 if 'vit' in args.model.lower() else 0.6
+    # Detect modern architectures (ViT, Swin, ConvNeXt) vs classic CNNs
+    modern_archs = ['vit', 'swin', 'convnext', 'dual']
+    p = 0.3 if any(arch in args.model.lower() for arch in modern_archs) else 0.6
     config = {'segsize': [16, 32, 48], 'nmasks': [800, 600, 400], 'pprob': [p]*3}
 
     # 3. Creator Selection
@@ -158,10 +199,12 @@ def main():
     else: 
         creator = AutoProbSlocExplanationCreator(**config)
 
-    # 4. Dataset Loading
-    if args.dataset == 'rsna':
-        RSNA_ROOT = "/kaggle/input/rsna-pneumonia-detection-challenge"
-        source = RSNASource(RSNA_ROOT)
+    # 4. Dataset Loading (Switch to Bone Age)
+    if args.dataset == 'rsna_boneage':
+        # Path for Kaggle RSNA Bone Age Dataset
+        BONEAGE_ROOT = "/kaggle/input/rsna-bone-age" 
+        from dataset import RSNABoneAgeSource, load_boneage_as_pil
+        source = RSNABoneAgeSource(BONEAGE_ROOT)
         all_images = list(source.get_all_images().values())
     else:
         VOC_ROOT = "/kaggle/input/pascalvoc/VOCdevkit/VOC2012"
@@ -189,9 +232,9 @@ def main():
         if image_name in processed_images: continue
 
         try:
-            # Handle RSNA DICOM to PIL
-            if args.dataset == 'rsna':
-                img_pil = load_rsna_as_pil(info.path)
+            # Handle RSNA Bone Age (PNG/JPG) vs VOC
+            if args.dataset == 'rsna_boneage':
+                img_pil = load_boneage_as_pil(info.path)
                 inp = me.get_transform()(img_pil).unsqueeze(0).to(me.device)
             else:
                 img_pil, inp = me.get_image_ext(info.path)
@@ -200,33 +243,30 @@ def main():
             logits = me.model(inp)
             target = torch.argmax(logits).item()
             
-            # SLOC Optimization
-            sal_numpy = creator.explain(me, inp, target)
+            # SLOC Optimization with Image ID for Epoch Logging
+            # creator.explain will now handle saving the 'epoch_logs_{model}.csv'
+            sal_numpy = creator.explain(me, inp, target, image_id=image_name)
             
-            # Paper-Compliant Evaluation
+            # Paper-Compliant Evaluation (STRICTLY UNCHANGED)
             m = SLOCPaperEvaluator(me.model, me.device).run(inp, sal_numpy, target, steps=50)
             
-            # --- ADDING CLASS LOGGING HERE ---
+            # Metadata Logging
             m['Image'] = image_name
-            m['GroundTruth'] = info.target  # 1 for Pneumonia, 0 for Normal
+            m['GroundTruth_Age'] = info.target  # Skeletal age in months
+            m['Sex'] = info.desc               # 'male' or 'female'
             m['Prediction'] = target
-            # ---------------------------------
 
-            print(f"[{i+1}/{len(selected_images)}] {image_name} (GT: {info.target})")
+            print(f"[{i+1}/{len(selected_images)}] {image_name} (Age: {info.target}m)")
             print(f"   IDD ↑: {m['IDD']:.4f} | NPD ↑: {m['NPD']:.4f} | AIC ↑: {m['AIC']:.4f} | SIC ↑: {m['SIC']:.4f}")
             print(f"   DEL ↓: {m['DEL']:.4f} | INS ↑: {m['INS']:.4f} | POS ↓: {m['POS']:.4f} | NEG ↑: {m['NEG']:.4f}")
 
-            # Incremental Save
+            # Incremental Final Results Save
             pd.DataFrame([m]).to_csv(output_csv, mode='a', header=not os.path.exists(output_csv), index=False)
 
         except Exception as e:
             print(f"FAILED for {image_name}: {e}")
 
-    # Final Summary Report
     print(f"\nBenchmark Complete. Total Time: {(time.time()-start_time)/3600:.2f} hours")
-    if os.path.exists(output_csv):
-        print("\nOVERALL MEAN SCORES:")
-        print(pd.read_csv(output_csv).mean(numeric_only=True).round(4))
 
 if __name__ == "__main__":
     main()
