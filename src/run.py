@@ -43,12 +43,10 @@ class SLOCPaperEvaluator:
         self.model.eval()
         h, w = img_tensor.shape[-2:]
         
-        # FIX 1: Ensure the saliency map is contiguous before processing
         if isinstance(sal_map, np.ndarray):
             sal_map = np.ascontiguousarray(sal_map)
             
         sal_flatten = sal_map.flatten()
-        # FIX 2: Explicitly copy flipped/sorted indices to avoid negative strides
         idx_desc = np.argsort(sal_flatten)[::-1].copy() 
         idx_asc = np.argsort(sal_flatten).copy()
         
@@ -59,7 +57,6 @@ class SLOCPaperEvaluator:
         step_size = len(idx_desc) // steps
 
         with torch.no_grad():
-            # Ensure tensors are contiguous for the view operation
             img_flat = img_tensor.view(1, 3, -1).contiguous()
             blur_flat = blur_base.view(1, 3, -1).contiguous()
             black_flat = black_base.view(1, 3, -1).contiguous()
@@ -71,10 +68,8 @@ class SLOCPaperEvaluator:
 
                 img_ins = black_flat.clone()
                 img_ins[:, :, top_idx] = img_flat[:, :, top_idx]
-                
                 img_del = img_flat.clone()
                 img_del[:, :, top_idx] = blur_flat[:, :, top_idx]
-                
                 img_neg = img_flat.clone()
                 img_neg[:, :, bot_idx] = blur_flat[:, :, bot_idx]
 
@@ -86,8 +81,21 @@ class SLOCPaperEvaluator:
                         curves["aic"].append(1.0 if torch.argmax(out) == target_idx else 0.0)
                         curves["sic"].append(prob)
 
-        auc = {k: np.trapz(v, dx=1/steps) for k, v in curves.items()}
-        return auc
+        # Calculate AUCs
+        # Use np.trapezoid to avoid the DeprecationWarning in newer NumPy versions
+        auc = {k: np.trapezoid(v, dx=1/steps) for k, v in curves.items()}
+        
+        # FIX: Explicitly map these to the keys the rest of your script expects
+        return {
+            "DEL": auc["del"], 
+            "INS": auc["ins"], 
+            "IDD": auc["ins"] - auc["del"], 
+            "POS": auc["pos"], 
+            "NEG": auc["neg"], 
+            "NPD": auc["neg"] - auc["pos"], 
+            "AIC": auc["aic"], 
+            "SIC": auc["sic"]
+        }
 
 # --- 2. SLOC_m Creator (Monitoring IDD) ---
 class SlocM_Creator(SlocExplanationCreator):
