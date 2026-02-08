@@ -5,7 +5,7 @@ import torch.optim as optim
 from PIL import Image
 from matplotlib import pyplot as plt
 
-# --- 100% Paper Match Helper: NumPy 2.x & Pathing ---
+# --- Environment Fixes & Imports ---
 if not hasattr(np, 'trapz'): np.trapz = np.trapezoid
 
 repo_path = "/kaggle/working/sloc"
@@ -17,7 +17,7 @@ from sloc import SlocExplanationCreator, MaskedExplanationSum, TotalVariationLos
 from visutils import showsal
 
 # ==============================================================================
-# EXPERIMENT 1: THE 8-METRIC EVALUATOR (PAPER COMPLIANT)
+# EXPERIMENT 1: THE 8-METRIC EVALUATOR (100% PAPER MATCH)
 # ==============================================================================
 class SLOCPaperEvaluator:
     def __init__(self, model, device):
@@ -29,13 +29,13 @@ class SLOCPaperEvaluator:
         self.model.eval()
         h, w = img_tensor.shape[-2:]
         
-        # FIX: The copy() call resolves the "negative stride" ValueError
+        # FIX: Force contiguous memory to prevent "negative stride" ValueError
         if isinstance(sal_map, np.ndarray):
             sal_map = np.ascontiguousarray(sal_map).copy()
             
         sal_flatten = sal_map.flatten()
-        idx_desc = np.argsort(sal_flatten)[::-1]
-        idx_asc = np.argsort(sal_flatten)
+        idx_desc = np.argsort(sal_flatten)[::-1] # High to Low (Importance)
+        idx_asc = np.argsort(sal_flatten)        # Low to High (Noise)
         
         # Baselines per paper: Deletion/Negative = Blur; Insertion/Positive = Black
         black_base = torch.zeros_like(img_tensor).to(self.device)
@@ -50,38 +50,44 @@ class SLOCPaperEvaluator:
                 top_idx = idx_desc[:n]
                 bot_idx = idx_asc[:n]
 
-                # INS: Start Black, Add Top Pixels
+                # 1. INS: Start Black, Add Top n pixels
                 img_ins = black_base.clone().view(1, 3, -1)
                 img_ins[:, :, top_idx] = img_tensor.view(1, 3, -1)[:, :, top_idx]
                 
-                # DEL: Start Orig, Remove Top Pixels (Replace with Blur)
+                # 2. DEL: Start Orig, Remove Top n pixels (Replace with Blur)
                 img_del = img_tensor.clone().view(1, 3, -1)
                 img_del[:, :, top_idx] = blur_base.view(1, 3, -1)[:, :, top_idx]
 
-                # NEG: Start Orig, Remove LEAST important pixels (Replace with Blur)
+                # 3. NEG: Start Orig, Remove LEAST important n pixels (Replace with Blur)
                 img_neg = img_tensor.clone().view(1, 3, -1)
                 img_neg[:, :, bot_idx] = blur_base.view(1, 3, -1)[:, :, bot_idx]
 
-                # Process Metrics
-                for k, img in zip(["ins", "del", "neg"], [img_ins, img_del, img_neg]):
+                # 4. POS: Start Black, Add Top n pixels (Often identical to INS in XAI tables)
+                img_pos = black_base.clone().view(1, 3, -1)
+                img_pos[:, :, top_idx] = img_tensor.view(1, 3, -1)[:, :, top_idx]
+
+                # Batch process Softmax probabilities
+                for k, img in zip(["ins", "del", "neg", "pos"], [img_ins, img_del, img_neg, img_pos]):
                     out = torch.softmax(self.model(img.view(1, 3, h, w)), dim=1)
                     prob = out[0, target_idx].item()
                     curves[k].append(prob)
                     if k == "ins":
-                        # AIC (Accuracy) & SIC (Softmax) curves
+                        # AIC: Accuracy Information Curve
                         curves["aic"].append(1.0 if torch.argmax(out) == target_idx else 0.0)
+                        # SIC: Softmax Information Curve
                         curves["sic"].append(prob)
 
+        # Calculate AUC for all 6 curves
         auc = {k: np.trapz(v, dx=1/steps) for k, v in curves.items()}
-        # NPD and IDD Summaries as per Experiment 1
+        
         return {
             "DEL ↓": auc["del"], "INS ↑": auc["ins"], "IDD ↑": auc["ins"] - auc["del"],
-            "POS ↓": auc["del"], "NEG ↑": auc["neg"], "NPD ↑": auc["neg"] - auc["del"],
+            "POS ↓": auc["pos"], "NEG ↑": auc["neg"], "NPD ↑": auc["neg"] - auc["pos"],
             "AIC ↑": auc["aic"], "SIC ↑": auc["sic"]
         }
 
 # ==============================================================================
-# SLOC_m CREATOR (MONITORING BEST IDD)
+# SLOC_m VARIANT (MONITORING IDD EVERY 50 EPOCHS)
 # ==============================================================================
 class SlocM_Creator(SlocExplanationCreator):
     def explain(self, me, inp, catidx):
@@ -102,7 +108,7 @@ class SlocM_Creator(SlocExplanationCreator):
             loss.backward()
             optimizer.step()
 
-            # Monitoring: Check IDD every 50 epochs
+            # Monitoring: Check IDD summary metric every 50 epochs and save best
             if epoch % 50 == 0:
                 cur_sal = mexp.explanation.detach().cpu().numpy().copy()
                 metrics = evaluator.run(inp, cur_sal, catidx, steps=10)
@@ -121,15 +127,18 @@ def main():
     parser.add_argument('--num_images', type=int, default=1000)
     args = parser.parse_args()
 
+    # Load Model Environment
     me = ModelEnv(args.model)
     evaluator = SLOCPaperEvaluator(me.model, me.device)
     
-    # Paper probabilities p based on architecture
+    # Paper Calibrations for p (Section 4.1)
     p = 0.2 if 'vit_base' in args.model else 0.3 if 'vit_small' in args.model else 0.6
     config = {'segsize': [16, 32, 48], 'nmasks': [800, 600, 400], 'pprob': [p]*3}
 
-    if args.variant == 'SLOC_m': creator = SlocM_Creator(**config)
-    else: creator = SlocExplanationCreator(**config)
+    if args.variant == 'SLOC_m': 
+        creator = SlocM_Creator(**config)
+    else: 
+        creator = SlocExplanationCreator(**config)
 
     # Dataset: PASCAL VOC 2012
     VOC_ROOT = "/kaggle/input/pascalvoc/VOCdevkit/VOC2012/JPEGImages"
@@ -143,23 +152,24 @@ def main():
         img_pil, inp = me.get_image_ext(path)
         target = torch.argmax(me.model(inp)).item()
         
-        print(f"[{i+1}/{len(selected_images)}] {args.variant} | {args.model} | {os.path.basename(path)}")
+        print(f"[{i+1}/{len(selected_images)}] Running {args.variant} | {args.model} | {os.path.basename(path)}")
         sal = creator.explain(me, inp, target)
         
-        # Full 8-Metric Suite
+        # Calculate full suite of 8 metrics
         m = evaluator.run(inp, sal, target)
         m['Image'] = os.path.basename(path)
         results.append(m)
         
+        # Save Visuals every 10 images
         if (i+1) % 10 == 0:
             showsal(torch.tensor(sal), img_pil.resize((224,224)))
             plt.savefig(f"visuals/res_{i+1}.png")
             plt.close()
 
     df = pd.DataFrame(results)
-    print("\n--- FINAL BENCHMARK MEANS ---")
+    print("\n--- FINAL EXPERIMENT 1 MEANS ---")
     print(df.mean(numeric_only=True).round(4))
-    df.to_csv(f"results_{args.variant}_{args.model}.csv", index=False)
+    df.to_csv(f"benchmark_{args.variant}_{args.model}.csv", index=False)
 
 if __name__ == "__main__":
     main()
