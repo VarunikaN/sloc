@@ -2,79 +2,90 @@ import subprocess
 import pandas as pd
 import os
 import glob
+import time
 
-# 1. Define your 8 backbones
-# Mix of CNNs, modern Meta-CNNs, and Transformers
+# 1. Backbones to benchmark
 MODELS = [
-    "resnet50",                  # Baseline CNN
-    "vit_base_patch16_224",      # Baseline Transformer
-    "mobilenet_v3_large",        # Lightweight CNN
-    "vgg16_bn",                  # Classic CNN
-    "convnext_tiny",             # Modern CNN
-    "densenet121",               # Medical Imaging Standard
-    "swin_tiny_patch4_window7_224", # Hierarchical Transformer
-    "efficientnet_v2_s"          # Efficient CNN
+    "resnet50",
+    "vit_base_patch16_224",
+    "mobilenet_v3_large",
+    "vgg16_bn",
+    "convnext_tiny",
+    "densenet121",
+    "swin_tiny_patch4_window7_224",
+    "efficientnet_v2_s"
 ]
 
-# 2. Benchmark Configuration
-DATASET = "rsna"
-NUM_IMAGES = 500  # Adjust based on your time constraints
+# 2. Configuration
+DATASET = "rsna_boneage"
+SPLIT = "training"  # Change to "validation" to run the other split
 VARIANT = "SLOC_m"
+# Set num_images to -1 to run the ENTIRE split
+NUM_IMAGES = -1 
 
 def run_benchmarks():
     for model in MODELS:
         print(f"\n{'='*60}")
-        print(f"LAUNCHING BENCHMARK: {model}")
+        print(f"STARTING BENCHMARK: {model} on {SPLIT} split")
         print(f"{'='*60}")
         
-        # Execute run.py as a subprocess to isolate GPU memory
+        # subprocess.run isolates GPU memory for each model run
         cmd = [
             "python", "run.py",
             "--variant", VARIANT,
             "--model", model,
             "--dataset", DATASET,
+            "--split", SPLIT,
             "--num_images", str(NUM_IMAGES),
             "--resume"
         ]
         
+        start = time.time()
         try:
             subprocess.run(cmd, check=True)
+            elapsed = (time.time() - start) / 3600
+            print(f"Finished {model} in {elapsed:.2f} hours.")
         except subprocess.CalledProcessError as e:
-            print(f"Error running benchmark for {model}: {e}")
+            print(f"Error encountered during {model}: {e}")
 
 def generate_leaderboard():
     print(f"\n{'='*60}")
-    print("GENERATING FINAL LEADERBOARD")
+    print(f"GENERATING LEADERBOARD FOR {SPLIT.upper()} SPLIT")
     print(f"{'='*60}")
     
-    all_files = glob.glob(f"sloc_{VARIANT.lower()}_*_{DATASET}_results.csv")
+    # Matches the output naming convention in your main() block
+    pattern = f"sloc_{VARIANT.lower()}_*_{DATASET}_{SPLIT}_results.csv"
+    all_files = glob.glob(pattern)
     summary_data = []
 
     for file in all_files:
         try:
-            # Extract model name from filename
-            model_name = file.split('_')[2:-2]
-            model_name = "_".join(model_name)
+            # Extract model name from filename logic
+            # sloc_sloc_m_<model>_rsna_boneage_training_results.csv
+            parts = file.replace(".csv", "").split("_")
+            # find index between variant and dataset
+            model_name = parts[2] 
             
             df = pd.read_csv(file)
-            # Calculate means for the metrics
             means = df.mean(numeric_only=True).to_dict()
             means['Model'] = model_name
             summary_data.append(means)
         except Exception as e:
-            print(f"Could not process {file}: {e}")
+            print(f"Could not process file {file}: {e}")
 
     if summary_data:
         leaderboard = pd.DataFrame(summary_data)
-        # Reorder columns to show important metrics first
+        # Metrics strictly preserved
         cols = ['Model', 'IDD', 'AIC', 'SIC', 'NPD', 'DEL', 'INS', 'POS', 'NEG']
-        leaderboard = leaderboard[cols].sort_values(by='IDD', ascending=False)
+        # Filter columns that exist
+        final_cols = [c for c in cols if c in leaderboard.columns]
+        leaderboard = leaderboard[final_cols].sort_values(by='IDD', ascending=False)
         
-        print("\nFINAL RESULTS (Ranked by IDD):")
+        print("\nRANKED LEADERBOARD:")
         print(leaderboard.to_string(index=False))
-        leaderboard.to_csv("final_benchmark_leaderboard.csv", index=False)
+        leaderboard.to_csv(f"final_leaderboard_{SPLIT}.csv", index=False)
     else:
-        print("No result files found to aggregate.")
+        print("No result files found for aggregation.")
 
 if __name__ == "__main__":
     run_benchmarks()

@@ -6,7 +6,7 @@ from PIL import Image
 from matplotlib import pyplot as plt
 
 # Import the new RSNA logic from your local dataset.py
-from dataset import RSNABoneAgeSource, load_rsna_as_pil, ImageInfo
+from dataset import RSNABoneAgeSource, load_boneage_as_pil, ImageInfo
 
 # Existing project imports
 from models import ModelEnv
