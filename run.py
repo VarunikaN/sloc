@@ -5,7 +5,7 @@ import torch.optim as optim
 from PIL import Image
 from matplotlib import pyplot as plt
 
-# --- Environment Fixes ---
+# --- 100% Paper Match Helper: NumPy 2.x & Pathing ---
 if not hasattr(np, 'trapz'): np.trapz = np.trapezoid
 
 repo_path = "/kaggle/working/sloc"
@@ -17,7 +17,7 @@ from sloc import SlocExplanationCreator, MaskedExplanationSum, TotalVariationLos
 from visutils import showsal
 
 # ==============================================================================
-# EXPERIMENT 1: FAITHFULNESS (100% PAPER LOGIC)
+# EXPERIMENT 1: THE 8-METRIC EVALUATOR (PAPER COMPLIANT)
 # ==============================================================================
 class SLOCPaperEvaluator:
     def __init__(self, model, device):
@@ -29,9 +29,9 @@ class SLOCPaperEvaluator:
         self.model.eval()
         h, w = img_tensor.shape[-2:]
         
-        # FIX: Ensure sal_map is contiguous and has positive strides
+        # FIX: The copy() call resolves the "negative stride" ValueError
         if isinstance(sal_map, np.ndarray):
-            sal_map = sal_map.copy()
+            sal_map = np.ascontiguousarray(sal_map).copy()
             
         sal_flatten = sal_map.flatten()
         idx_desc = np.argsort(sal_flatten)[::-1]
@@ -50,29 +50,30 @@ class SLOCPaperEvaluator:
                 top_idx = idx_desc[:n]
                 bot_idx = idx_asc[:n]
 
-                # INS: Black base + Top n pixels
+                # INS: Start Black, Add Top Pixels
                 img_ins = black_base.clone().view(1, 3, -1)
                 img_ins[:, :, top_idx] = img_tensor.view(1, 3, -1)[:, :, top_idx]
                 
-                # DEL: Orig image - Top n pixels (Replace with Blur)
+                # DEL: Start Orig, Remove Top Pixels (Replace with Blur)
                 img_del = img_tensor.clone().view(1, 3, -1)
                 img_del[:, :, top_idx] = blur_base.view(1, 3, -1)[:, :, top_idx]
 
-                # NEG: Orig image - Bottom n pixels (Replace with Blur)
+                # NEG: Start Orig, Remove LEAST important pixels (Replace with Blur)
                 img_neg = img_tensor.clone().view(1, 3, -1)
                 img_neg[:, :, bot_idx] = blur_base.view(1, 3, -1)[:, :, bot_idx]
 
-                # Run Batch
+                # Process Metrics
                 for k, img in zip(["ins", "del", "neg"], [img_ins, img_del, img_neg]):
                     out = torch.softmax(self.model(img.view(1, 3, h, w)), dim=1)
                     prob = out[0, target_idx].item()
                     curves[k].append(prob)
                     if k == "ins":
+                        # AIC (Accuracy) & SIC (Softmax) curves
                         curves["aic"].append(1.0 if torch.argmax(out) == target_idx else 0.0)
                         curves["sic"].append(prob)
 
         auc = {k: np.trapz(v, dx=1/steps) for k, v in curves.items()}
-        # NPD/IDD Summary Metrics
+        # NPD and IDD Summaries as per Experiment 1
         return {
             "DEL ↓": auc["del"], "INS ↑": auc["ins"], "IDD ↑": auc["ins"] - auc["del"],
             "POS ↓": auc["del"], "NEG ↑": auc["neg"], "NPD ↑": auc["neg"] - auc["del"],
@@ -80,7 +81,7 @@ class SLOCPaperEvaluator:
         }
 
 # ==============================================================================
-# SLOC_m CREATOR (MONITORING IDD)
+# SLOC_m CREATOR (MONITORING BEST IDD)
 # ==============================================================================
 class SlocM_Creator(SlocExplanationCreator):
     def explain(self, me, inp, catidx):
@@ -96,14 +97,14 @@ class SlocM_Creator(SlocExplanationCreator):
         for epoch in range(501):
             optimizer.zero_grad()
             output = mexp(data.all_masks)
-            # Equation 5: Comp Loss + TV + Magnitude
+            # Equation 5: Loss = Completeness Gap + TV + Magnitude
             loss = ((output - data.all_pred)**2).mean() + 0.05 * tv(mexp.explanation) + 0.01 * mexp.explanation.abs().mean()
             loss.backward()
             optimizer.step()
 
-            # Monitoring: Pick map that maximizes IDD during optimization
+            # Monitoring: Check IDD every 50 epochs
             if epoch % 50 == 0:
-                cur_sal = mexp.explanation.detach().cpu().numpy().copy() # FIX: Added .copy()
+                cur_sal = mexp.explanation.detach().cpu().numpy().copy()
                 metrics = evaluator.run(inp, cur_sal, catidx, steps=10)
                 if metrics["IDD ↑"] > state['best_idd']:
                     state['best_idd'] = metrics["IDD ↑"]
@@ -116,24 +117,24 @@ class SlocM_Creator(SlocExplanationCreator):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--variant', type=str, default='SLOC_m', choices=['SLOC', 'SLOC_xp', 'SLOC_m'])
-    parser.add_argument('--model', type=str, default='resnet50', choices=['resnet50', 'densenet201', 'vit_base_patch16_224'])
+    parser.add_argument('--model', type=str, default='resnet50')
     parser.add_argument('--num_images', type=int, default=1000)
     args = parser.parse_args()
 
     me = ModelEnv(args.model)
     evaluator = SLOCPaperEvaluator(me.model, me.device)
     
-    # Paper Calibrations
+    # Paper probabilities p based on architecture
     p = 0.2 if 'vit_base' in args.model else 0.3 if 'vit_small' in args.model else 0.6
     config = {'segsize': [16, 32, 48], 'nmasks': [800, 600, 400], 'pprob': [p]*3}
 
     if args.variant == 'SLOC_m': creator = SlocM_Creator(**config)
     else: creator = SlocExplanationCreator(**config)
 
-    # Path for PASCAL VOC 2012
+    # Dataset: PASCAL VOC 2012
     VOC_ROOT = "/kaggle/input/pascalvoc/VOCdevkit/VOC2012/JPEGImages"
     images = [os.path.join(VOC_ROOT, f) for f in os.listdir(VOC_ROOT) if f.endswith('.jpg')]
-    selected_images = random.sample(images, args.num_images)
+    selected_images = random.sample(images, min(args.num_images, len(images)))
     
     os.makedirs("visuals", exist_ok=True)
     results = []
@@ -142,9 +143,10 @@ def main():
         img_pil, inp = me.get_image_ext(path)
         target = torch.argmax(me.model(inp)).item()
         
-        print(f"[{i+1}/{args.num_images}] {args.variant} on {args.model} | {os.path.basename(path)}")
+        print(f"[{i+1}/{len(selected_images)}] {args.variant} | {args.model} | {os.path.basename(path)}")
         sal = creator.explain(me, inp, target)
         
+        # Full 8-Metric Suite
         m = evaluator.run(inp, sal, target)
         m['Image'] = os.path.basename(path)
         results.append(m)
@@ -155,8 +157,9 @@ def main():
             plt.close()
 
     df = pd.DataFrame(results)
+    print("\n--- FINAL BENCHMARK MEANS ---")
     print(df.mean(numeric_only=True).round(4))
-    df.to_csv(f"benchmark_{args.variant}_{args.model}.csv", index=False)
+    df.to_csv(f"results_{args.variant}_{args.model}.csv", index=False)
 
 if __name__ == "__main__":
     main()
