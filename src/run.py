@@ -186,32 +186,36 @@ def main():
 
     for i, info in enumerate(selected_images):
         image_name = info.name
-        if image_name in processed_images: 
-            continue
+        if image_name in processed_images: continue
 
         try:
-            # Handle RSNA DICOM (1-ch) to PIL (3-ch) conversion for ViT compatibility
+            # Handle RSNA DICOM to PIL
             if args.dataset == 'rsna':
                 img_pil = load_rsna_as_pil(info.path)
                 inp = me.get_transform()(img_pil).unsqueeze(0).to(me.device)
             else:
                 img_pil, inp = me.get_image_ext(info.path)
             
-            target = torch.argmax(me.model(inp)).item()
+            # Prediction
+            logits = me.model(inp)
+            target = torch.argmax(logits).item()
             
-            # SLOC Optimization (SLOC_m variant)
+            # SLOC Optimization
             sal_numpy = creator.explain(me, inp, target)
             
-            # Paper-Compliant Evaluation (All 8 Metrics)
+            # Paper-Compliant Evaluation
             m = SLOCPaperEvaluator(me.model, me.device).run(inp, sal_numpy, target, steps=50)
-            m['Image'] = image_name
             
-            # Printing metrics to console
-            print(f"\n[{i+1}/{len(selected_images)}] {image_name}")
-            print(f"   IDD ↑: {m['IDD']:.4f} | NPD ↑: {m['NPD']:.4f} | AIC ↑: {m['AIC']:.4f} | SIC ↑: {m['SIC']:.4f}")
-            print(f"   DEL ↓: {m['DEL']:.4f} | INS ↑: {m['INS']:.4f} | POS ↓: {m['POS']:.4f} | NEG ↑: {m['NEG']:.4f}")
+            # --- ADDING CLASS LOGGING HERE ---
+            m['Image'] = image_name
+            m['GroundTruth'] = info.target  # 1 for Pneumonia, 0 for Normal
+            m['Prediction'] = target
+            # ---------------------------------
 
-            # Incremental CSV Save (Checkpoints)
+            print(f"[{i+1}/{len(selected_images)}] {image_name} (GT: {info.target})")
+            print(f"   IDD ↑: {m['IDD']:.4f} | AIC ↑: {m['AIC']:.4f} | NPD ↑: {m['NPD']:.4f}")
+
+            # Incremental Save
             pd.DataFrame([m]).to_csv(output_csv, mode='a', header=not os.path.exists(output_csv), index=False)
 
         except Exception as e:
