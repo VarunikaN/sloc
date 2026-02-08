@@ -16,7 +16,7 @@ from visutils import showsal
 # --- Environment Fixes & Imports ---
 if not hasattr(np, 'trapz'): np.trapz = np.trapezoid
 
-repo_path = "/kaggle/working/sloc"
+repo_path = "/home/iiitdmk-drnagaraju/xai/sloc"
 src_path = os.path.join(repo_path, "src")
 if src_path not in sys.path: sys.path.insert(0, src_path)
 
