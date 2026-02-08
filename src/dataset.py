@@ -9,8 +9,6 @@ import atexit
 import pydicom
 import pandas as pd
 
-import pydicom
-
 class RSNASource:
     def __init__(self, base_path):
         self.base_path = base_path
@@ -18,9 +16,9 @@ class RSNASource:
         self.csv_path = os.path.join(base_path, 'stage_2_train_labels.csv')
 
     def get_all_images(self):
-        # ImageInfo is the dataclass from your existing dataset.py
+        # Uses the ImageInfo dataclass already in your project
         df = pd.read_csv(self.csv_path)
-        # Drop duplicates as CSV has rows per bounding box
+        # Drop duplicates since the CSV has one entry per bounding box
         df = df.drop_duplicates(subset=['patientId'])
         
         images = {}
@@ -28,21 +26,20 @@ class RSNASource:
             p_id = row['patientId']
             path = os.path.join(self.image_dir, f"{p_id}.dcm")
             if os.path.exists(path):
-                # Target 1 for Pneumonia, 0 for Normal
+                # Target 1: Pneumonia, 0: Normal
                 target = int(row['Target'])
-                # We wrap it in your existing ImageInfo structure
                 images[p_id] = ImageInfo(path=path, name=p_id, target=target, desc="rsna")
         return images
 
 def load_rsna_as_pil(path):
-    """Specific loader for RSNA DICOM files to 3-channel RGB PIL."""
+    """Converts 1-channel DICOM to 3-channel RGB PIL for ViT compatibility."""
     ds = pydicom.dcmread(path)
     img = ds.pixel_array.astype(float)
-    # Normalize to 0-255 range
+    # Standard Min-Max Normalization
     img = (np.maximum(img, 0) / img.max()) * 255.0
-    # Convert grayscale to RGB so ViT/ResNet models can process it
+    # Convert to RGB so ImageNet-pretrained ViT can accept the input shape
     return Image.fromarray(img.astype(np.uint8)).convert('RGB')
-    
+
 @dataclass
 class ImageInfo:
     path : str
