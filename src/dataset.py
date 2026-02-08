@@ -11,17 +11,26 @@ import pandas as pd
 import numpy as np
 
 class RSNABoneAgeSource:
-    def __init__(self, base_path, split='train'):
+    def __init__(self, base_path, split='training'):
+        # Matches your screenshot: /home/iiitdmk-drnagaraju/aps/RSNA_original14236_images
         self.base_path = base_path
-        self.image_dir = os.path.join(base_path, 'training-dataset')
-        self.csv_path = os.path.join(base_path, 'train.csv')
+        self.split = split
+        
+        # Paths based on screenshot structure
+        self.image_dir = os.path.join(base_path, f'boneage-{split}-dataset')
+        self.csv_path = os.path.join(base_path, f'boneage-{split}-dataset.csv')
 
     def get_all_images(self):
+        if not os.path.exists(self.csv_path):
+            raise FileNotFoundError(f"CSV not found at {self.csv_path}")
+            
         df = pd.read_csv(self.csv_path)
         images = {}
         for _, row in df.iterrows():
             img_id = str(row['id'])
+            # The dataset usually uses PNG files
             path = os.path.join(self.image_dir, f"{img_id}.png")
+            
             if os.path.exists(path):
                 images[img_id] = ImageInfo(
                     path=path, 

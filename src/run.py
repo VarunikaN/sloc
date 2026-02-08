@@ -172,11 +172,12 @@ class SlocM_Creator(SlocExplanationCreator):
 
 # --- 3. Main Execution Block ---
 def main():
-    parser = argparse.ArgumentParser(description="Run SLOC Benchmark with RSNA Bone Age Support.")
+    parser = argparse.ArgumentParser(description="Run SLOC Benchmark on Full RSNA Bone Age Split.")
     parser.add_argument('--variant', type=str, default='SLOC_m', choices=['SLOC', 'SLOC_xp', 'SLOC_m'])
-    parser.add_argument('--model', type=str, default='resnet50', help="resnet50, vit_base_patch16_224, etc.")
-    parser.add_argument('--dataset', type=str, default='rsna_boneage', choices=['voc', 'rsna_boneage'])
-    parser.add_argument('--num_images', type=int, default=1000)
+    parser.add_argument('--model', type=str, default='resnet50')
+    parser.add_argument('--dataset', type=str, default='rsna_boneage')
+    parser.add_argument('--split', type=str, default='training', choices=['training', 'validation'])
+    parser.add_argument('--num_images', type=int, default=-1, help="If > 0, limit to this many images. Otherwise, run all.")
     parser.add_argument('--resume', action='store_true', help="Skip images already present in results CSV")
     
     args = parser.parse_args()
@@ -186,7 +187,6 @@ def main():
     print(f"GPU CHECK: Model {args.model} is running on: {me.device}")
     
     # 2. Paper Calibration (Section 4.1)
-    # Detect modern architectures (ViT, Swin, ConvNeXt) vs classic CNNs
     modern_archs = ['vit', 'swin', 'convnext', 'dual']
     p = 0.3 if any(arch in args.model.lower() for arch in modern_archs) else 0.6
     config = {'segsize': [16, 32, 48], 'nmasks': [800, 600, 400], 'pprob': [p]*3}
@@ -199,74 +199,73 @@ def main():
     else: 
         creator = AutoProbSlocExplanationCreator(**config)
 
-    # 4. Dataset Loading (Switch to Bone Age)
+    # 4. Dataset Loading (Using full split based on local path)
     if args.dataset == 'rsna_boneage':
-        # Path to your downloaded data
-        BONEAGE_ROOT = './rsna-boneage-data' 
+        BONEAGE_ROOT = "/home/iiitdmk-drnagaraju/aps/RSNA_original14236_images"
         from dataset import RSNABoneAgeSource, load_boneage_as_pil
         
-        # We target the training split since it has the labels
-        source = RSNABoneAgeSource(BONEAGE_ROOT, split='train')
+        source = RSNABoneAgeSource(BONEAGE_ROOT, split=args.split)
         all_images = list(source.get_all_images().values())
         
-        # 5. FIXED SEED SAMPLING
-        # This is the most important part for model comparison!
-        random.seed(1234) 
-        if args.num_images > 0:
-            selected_images = random.sample(all_images, min(args.num_images, len(all_images)))
+        # Determine if we run full split or a limited subset
+        if args.num_images > 0 and args.num_images < len(all_images):
+            # If a limit is specified, we still sample with a seed for multi-backbone consistency
+            random.seed(1234)
+            selected_images = random.sample(all_images, args.num_images)
+            print(f"Running subset: {len(selected_images)} images from {args.split} split.")
         else:
+            # RUN ENTIRE SPLIT
             selected_images = all_images
-        
-        print(f"Comparison ready: All models will test on the same {len(selected_images)} images.")
+            print(f"Running FULL {args.split} split: {len(selected_images)} images.")
     else:
         VOC_ROOT = "/kaggle/input/pascalvoc/VOCdevkit/VOC2012"
-        all_images = get_voc_val_images(VOC_ROOT) 
+        selected_images = get_voc_val_images(VOC_ROOT) 
     
-    # 5. Sampling and Checkpointing
-    selected_images = random.sample(all_images, min(args.num_images, len(all_images))) if args.num_images > 0 else all_images
-    output_csv = f"sloc_{args.variant.lower()}_{args.model}_{args.dataset}_results.csv"
+    # 5. Output Setup
+    output_csv = f"sloc_{args.variant.lower()}_{args.model}_{args.dataset}_{args.split}_results.csv"
     
     processed_images = set()
     if args.resume and os.path.exists(output_csv):
         try:
             existing_df = pd.read_csv(output_csv)
             processed_images = set(existing_df['Image'].astype(str).tolist())
-            print(f"Resuming: Skipping {len(processed_images)} images.")
+            print(f"Resuming: Skipping {len(processed_images)} already processed images.")
         except: 
             print("Starting fresh: CSV empty or unreadable.")
 
     # 6. Benchmark Loop
-    print(f"Starting Benchmark: {args.variant} | {args.model} | {args.dataset}")
+    print(f"Benchmark Configuration: {args.variant} | {args.model} | {args.split}")
     start_time = time.time()
 
     for i, info in enumerate(selected_images):
         image_name = info.name
-        if image_name in processed_images: continue
+        if image_name in processed_images: 
+            continue
 
         try:
-            # Handle RSNA Bone Age (PNG/JPG) vs VOC
+            # Load image based on dataset type
             if args.dataset == 'rsna_boneage':
                 img_pil = load_boneage_as_pil(info.path)
                 inp = me.get_transform()(img_pil).unsqueeze(0).to(me.device)
             else:
                 img_pil, inp = me.get_image_ext(info.path)
             
-            # Prediction
+            # Get model prediction
             logits = me.model(inp)
             target = torch.argmax(logits).item()
             
-            # SLOC Optimization with Image ID for Epoch Logging
-            # creator.explain will now handle saving the 'epoch_logs_{model}.csv'
+            # SLOC Optimization + Epoch Logging inside creator.explain
             sal_numpy = creator.explain(me, inp, target, image_id=image_name)
             
-            # Paper-Compliant Evaluation (STRICTLY UNCHANGED)
+            # Paper-Compliant Evaluation (Metrics strictly preserved)
             m = SLOCPaperEvaluator(me.model, me.device).run(inp, sal_numpy, target, steps=50)
             
             # Metadata Logging
             m['Image'] = image_name
-            m['GroundTruth_Age'] = info.target  # Skeletal age in months
-            m['Sex'] = info.desc               # 'male' or 'female'
+            m['GroundTruth_Age'] = info.target
+            m['Sex'] = info.desc
             m['Prediction'] = target
+            m['Split'] = args.split
 
             print(f"[{i+1}/{len(selected_images)}] {image_name} (Age: {info.target}m)")
             print(f"   IDD ↑: {m['IDD']:.4f} | NPD ↑: {m['NPD']:.4f} | AIC ↑: {m['AIC']:.4f} | SIC ↑: {m['SIC']:.4f}")
