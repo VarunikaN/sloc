@@ -5,6 +5,14 @@ import torch.optim as optim
 from PIL import Image
 from matplotlib import pyplot as plt
 
+# Import the new RSNA logic from your local dataset.py
+from dataset import RSNASource, load_rsna_as_pil, ImageInfo
+
+# Existing project imports
+from models import ModelEnv
+from sloc import SlocExplanationCreator, AutoProbSlocExplanationCreator, MaskedExplanationSum, TotalVariationLoss
+from visutils import showsal
+
 # --- Environment Fixes & Imports ---
 if not hasattr(np, 'trapz'): np.trapz = np.trapezoid
 
@@ -133,20 +141,16 @@ def main():
     
     args = parser.parse_args()
 
-    # 1. Load Model Environment
+    # 1. Model Environment Setup
     me = ModelEnv(args.model)
     print(f"GPU CHECK: Model {args.model} is running on: {me.device}")
     
-    # 2. Paper Calibrations for Architecture (Section 4.1)
-    # ViT density p=0.3, CNN density p=0.6 
-    if 'vit' in args.model.lower(): 
-        p = 0.3
-    else: 
-        p = 0.6
-        
+    # 2. Paper Calibration (Section 4.1)
+    # ViT density p=0.3, CNN density p=0.6 (Paper standard)
+    p = 0.3 if 'vit' in args.model.lower() else 0.6
     config = {'segsize': [16, 32, 48], 'nmasks': [800, 600, 400], 'pprob': [p]*3}
 
-    # 3. Variant Selection
+    # 3. Creator Selection
     if args.variant == 'SLOC_m': 
         creator = SlocM_Creator(**config)
     elif args.variant == 'SLOC_xp': 
@@ -154,48 +158,40 @@ def main():
     else: 
         creator = AutoProbSlocExplanationCreator(**config)
 
-    # 4. Dataset Loading (Using classes in datasets.py)
+    # 4. Dataset Loading
     if args.dataset == 'rsna':
         RSNA_ROOT = "/kaggle/input/rsna-pneumonia-detection-challenge"
         source = RSNASource(RSNA_ROOT)
-        all_images_dict = source.get_all_images()
-        all_images = list(all_images_dict.values())
+        all_images = list(source.get_all_images().values())
     else:
         VOC_ROOT = "/kaggle/input/pascalvoc/VOCdevkit/VOC2012"
-        all_images = get_voc_val_images(VOC_ROOT) # Using official val.txt split
+        all_images = get_voc_val_images(VOC_ROOT) 
     
-    # 5. Sampling and Output Setup
-    if args.num_images > 0:
-        selected_images = random.sample(all_images, min(args.num_images, len(all_images)))
-    else:
-        selected_images = all_images
-        
+    # 5. Sampling and Checkpointing
+    selected_images = random.sample(all_images, min(args.num_images, len(all_images))) if args.num_images > 0 else all_images
     output_csv = f"sloc_{args.variant.lower()}_{args.model}_{args.dataset}_results.csv"
     
-    # Checkpoint/Resume Logic
     processed_images = set()
     if args.resume and os.path.exists(output_csv):
         try:
             existing_df = pd.read_csv(output_csv)
             processed_images = set(existing_df['Image'].astype(str).tolist())
-            print(f"Resuming: Skipping {len(processed_images)} images already in {output_csv}")
-        except Exception as e:
-            print(f"Resume failed (CSV empty or corrupted): {e}")
+            print(f"Resuming: Skipping {len(processed_images)} images.")
+        except: 
+            print("Starting fresh: CSV empty or unreadable.")
 
-    # 6. Execution Loop
+    # 6. Benchmark Loop
     print(f"Starting Benchmark: {args.variant} | {args.model} | {args.dataset}")
     start_time = time.time()
 
     for i, info in enumerate(selected_images):
-        image_name = info.name # Works for both VOC ImageInfo and RSNA ImageInfo
-        
-        if image_name in processed_images:
+        image_name = info.name
+        if image_name in processed_images: 
             continue
 
         try:
-            # Handle RSNA DICOM vs VOC JPEG loading
+            # Handle RSNA DICOM (1-ch) to PIL (3-ch) conversion for ViT compatibility
             if args.dataset == 'rsna':
-                from datasets import load_rsna_as_pil # Ensure this is imported
                 img_pil = load_rsna_as_pil(info.path)
                 inp = me.get_transform()(img_pil).unsqueeze(0).to(me.device)
             else:
@@ -203,24 +199,29 @@ def main():
             
             target = torch.argmax(me.model(inp)).item()
             
-            # Generate SLOC explanation (Paper logic)
+            # SLOC Optimization (SLOC_m variant)
             sal_numpy = creator.explain(me, inp, target)
             
-            # Evaluate using the 100% Paper Evaluator (8 Metrics)
+            # Paper-Compliant Evaluation (All 8 Metrics)
             m = SLOCPaperEvaluator(me.model, me.device).run(inp, sal_numpy, target, steps=50)
             m['Image'] = image_name
             
-            # Print metrics to console for monitoring
-            print(f"[{i+1}/{len(selected_images)}] {image_name} -> IDD ↑: {m['IDD']:.4f} | AIC ↑: {m['AIC']:.4f}")
-            
-            # Incremental CSV Save (Checkpointing)
+            # Printing metrics to console
+            print(f"\n[{i+1}/{len(selected_images)}] {image_name}")
+            print(f"   IDD ↑: {m['IDD']:.4f} | NPD ↑: {m['NPD']:.4f} | AIC ↑: {m['AIC']:.4f} | SIC ↑: {m['SIC']:.4f}")
+            print(f"   DEL ↓: {m['DEL']:.4f} | INS ↑: {m['INS']:.4f} | POS ↓: {m['POS']:.4f} | NEG ↑: {m['NEG']:.4f}")
+
+            # Incremental CSV Save (Checkpoints)
             pd.DataFrame([m]).to_csv(output_csv, mode='a', header=not os.path.exists(output_csv), index=False)
 
         except Exception as e:
             print(f"FAILED for {image_name}: {e}")
-            with open("error_log.txt", "a") as f: f.write(f"{image_name}: {str(e)}\n")
 
+    # Final Summary Report
     print(f"\nBenchmark Complete. Total Time: {(time.time()-start_time)/3600:.2f} hours")
+    if os.path.exists(output_csv):
+        print("\nOVERALL MEAN SCORES:")
+        print(pd.read_csv(output_csv).mean(numeric_only=True).round(4))
 
 if __name__ == "__main__":
     main()
