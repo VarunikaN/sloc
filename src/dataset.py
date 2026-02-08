@@ -8,6 +8,7 @@ import torchvision
 import atexit
 import pydicom
 import pandas as pd
+import numpy as np
 
 class RSNASource:
     def __init__(self, base_path):
