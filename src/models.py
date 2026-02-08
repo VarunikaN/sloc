@@ -20,19 +20,35 @@ class ModelEnv:
         if arch.startswith('voc_'):
             model_arch = arch.replace('voc_','')
             model = torchray.benchmark.models.get_model(arch=model_arch, dataset="voc", convert_to_fully_convolutional=False)
-        
-        # Check torchvision first for classic models
-        elif arch in torchvision.models.__dict__:
-            model = torchvision.models.__dict__[arch](weights='DEFAULT')
-            
-        # Fallback to timm for modern/custom models (ConvNeXt, Swin, EfficientNet, RegNet, MobileNet)
-        else:
-            try:
-                model = timm.create_model(arch, pretrained=True)
-            except Exception as e:
-                print(f"Error loading {arch}: {e}")
-                assert False, f"Architecture {arch} not found in torchvision or timm"
 
+        elif arch == 'vgg16NT':
+            model = torchvision.models.vgg16(pretrained=False)
+        elif arch == 'vgg16RT':            
+            model = torchvision.models.vgg16(pretrained=False)
+            output_weights_path = 'models/vgg16_retrained_n.pth'
+            model.load_state_dict(torch.load(output_weights_path))
+
+        elif 'resnet' in arch or 'vgg' in arch:
+        # Get a network pre-trained on ImageNet.
+            model = torchvision.models.__dict__[arch](pretrained=True)
+            #for param in model.parameters():
+            #    param.requires_grad_(False)        
+        elif 'vit' in arch or 'convnext' in arch or 'densenet' in arch or 'swin' in arch or 'efficientnet' in arch:
+            model = timm.create_model(arch, pretrained=True)
+        elif arch in torchvision.models.__dict__:
+            # This will catch mobilenet, resnet, vgg, etc.
+            model = torchvision.models.__dict__[arch](weights='DEFAULT')
+        else:
+            assert False, f"unexpected arch: {arch}"
+            
+        model.eval()        
+        model = model.to(dev)
+        return model
+
+    
+        else:
+            assert False, "unexpected arch"
+        
         model.eval()        
         model = model.to(dev)
         return model
@@ -93,29 +109,28 @@ class ModelEnv:
 
     def get_transform(self):    
         if "voc" in self.arch:
-            #print("voc transform 3")
             transform = transforms.Compose([
-                transforms.Resize((224, 224)),  # Resize to (224, 224)
-                transforms.ToTensor(),  # Convert to tensor (scales to [0,1])
-                transforms.Lambda(lambda x: x * 255.0)  # Multiply by 255
+                transforms.Resize((224, 224)),
+                transforms.ToTensor(),
+                transforms.Lambda(lambda x: x * 255.0)
             ])
-        elif 'resnet' in self.arch or 'vgg' in self.arch or 'convnext' in self.arch or 'densenet' in self.arch:
+        # Add 'mobilenet', 'efficientnet', and 'regnet' to this condition
+        elif any(x in self.arch for x in ['resnet', 'vgg', 'convnext', 'densenet', 'mobilenet', 'efficientnet', 'regnet']):
             transform = torchvision.transforms.Compose([
                 torchvision.transforms.Resize(self.shape),
                 torchvision.transforms.CenterCrop(self.shape),
                 torchvision.transforms.ToTensor(),
                 torchvision.transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                             std=[0.229, 0.224, 0.225]),
+                                               std=[0.229, 0.224, 0.225]),
             ])
-        elif 'vit' in self.arch:
+        elif 'vit' in self.arch or 'swin' in self.arch:
             transform = transforms.Compose([
                 transforms.Resize((224, 224)),
                 transforms.ToTensor(),
-                transforms.Normalize(mean=[0.5,0.5,0.5], std=[0.5,0.5,0.5]),
-                #transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+                transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
             ])
         else:
-            assert False, "unexpected arch"
+            assert False, f"unexpected arch: {self.arch}"
         return transform
 
     def get_image_ext(self, path):
