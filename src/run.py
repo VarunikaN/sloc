@@ -209,6 +209,7 @@ def main():
             # Evaluate using the 100% Paper Evaluator (8 Metrics)
             m = SLOCPaperEvaluator(me.model, me.device).run(inp, sal_numpy, target, steps=50)
             m['Image'] = image_name
+            print(f"   [RESULT] IDD ↑: {m['IDD']:.4f} | NPD ↑: {m['NPD']:.4f} | AIC ↑: {m['AIC']:.4f} | SIC ↑: {m['SIC']:.4f}")
             results_list.append(m)
             
             # Incremental CSV Save
