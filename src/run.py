@@ -124,84 +124,103 @@ class SlocM_Creator(SlocExplanationCreator):
 
 # --- 3. Main Execution Block ---
 def main():
-    parser = argparse.ArgumentParser(description="Run the SLOC benchmark on the PASCAL VOC 2012 dataset.")
+    parser = argparse.ArgumentParser(description="Run SLOC Benchmark with RSNA/VOC support.")
     parser.add_argument('--variant', type=str, default='SLOC_m', choices=['SLOC', 'SLOC_xp', 'SLOC_m'])
-    parser.add_argument('--model', type=str, default='resnet50')
+    parser.add_argument('--model', type=str, default='resnet50', help="resnet50, densenet201, or vit_base_patch16_224")
+    parser.add_argument('--dataset', type=str, default='voc', choices=['voc', 'rsna'])
     parser.add_argument('--num_images', type=int, default=1000)
+    parser.add_argument('--resume', action='store_true', help="Skip images already present in results CSV")
     
     args = parser.parse_args()
 
-    # Load Model Environment
+    # 1. Load Model Environment
     me = ModelEnv(args.model)
-    print(f"GPU CHECK: Model is running on device: {me.device}")
+    print(f"GPU CHECK: Model {args.model} is running on: {me.device}")
     
-    # Paper Calibrations
-    if 'vit' in args.model.lower(): p = 0.3
-    else: p = 0.6
+    # 2. Paper Calibrations for Architecture
+    # ViT density p=0.3, CNN density p=0.6 (Section 4.1)
+    if 'vit' in args.model.lower(): 
+        p = 0.3
+    else: 
+        p = 0.6
         
     config = {'segsize': [16, 32, 48], 'nmasks': [800, 600, 400], 'pprob': [p]*3}
 
-    if args.variant == 'SLOC_m': creator = SlocM_Creator(**config)
-    elif args.variant == 'SLOC_xp': creator = SlocExplanationCreator(**config)
-    else: creator = AutoProbSlocExplanationCreator(**config)
+    # 3. Variant Selection
+    if args.variant == 'SLOC_m': 
+        creator = SlocM_Creator(**config)
+    elif args.variant == 'SLOC_xp': 
+        creator = SlocExplanationCreator(**config)
+    else: 
+        creator = AutoProbSlocExplanationCreator(**config)
 
-    # Dataset: PASCAL VOC 2012
-    VOC_ROOT = "/kaggle/input/pascalvoc/VOCdevkit/VOC2012"
-    images = get_voc_val_images(VOC_ROOT)
+    # 4. Dataset Loading
+    if args.dataset == 'rsna':
+        RSNA_ROOT = "/kaggle/input/rsna-pneumonia-detection-challenge"
+        source = RSNASource(RSNA_ROOT)
+        all_images = list(source.get_all_images().values())
+    else:
+        VOC_ROOT = "/kaggle/input/pascalvoc/VOCdevkit/VOC2012"
+        # Using the val.txt split for 100% paper match
+        all_images = get_voc_val_images(VOC_ROOT) 
     
-    if args.num_images > 0: selected_images = random.sample(images, min(args.num_images, len(images)))
-    else: selected_images = images
+    # 5. Sampling and Resume Logic
+    if args.num_images > 0:
+        selected_images = random.sample(all_images, min(args.num_images, len(all_images)))
+    else:
+        selected_images = all_images
+        
+    output_csv = f"sloc_{args.variant.lower()}_{args.model}_{args.dataset}_results.csv"
     
-    NUM_IMAGES = len(selected_images); output_csv = f"sloc_{args.variant.lower()}_{args.model}_voc{NUM_IMAGES}_results.csv"
-    if os.path.exists(output_csv): os.remove(output_csv)
-
-    print(f"Starting PASCAL VOC Benchmark ({args.variant} on {args.model}) for {NUM_IMAGES} images.")
-    start_time = time.time(); results_list = []
-
-    for i, path in enumerate(selected_images):
-        name = os.path.basename(path)
-        
-        eta = ''
-        if i > 0:
-            avg_time = (time.time() - start_time) / i
-            eta_seconds = avg_time * (NUM_IMAGES - i)
-            eta = f" | ETA: {eta_seconds/3600:.2f} hours"
-
-        print(f"\n[{i+1}/{NUM_IMAGES}] Processing {name}...{eta}")
-        
+    processed_images = set()
+    if args.resume and os.path.exists(output_csv):
         try:
-            img_pil, inp = me.get_image_ext(path); target = torch.argmax(me.model(inp)).item()
+            existing_df = pd.read_csv(output_csv)
+            processed_images = set(existing_df['Image'].astype(str).tolist())
+            print(f"Resuming: Skipping {len(processed_images)} images already in {output_csv}")
+        except Exception as e:
+            print(f"Resume failed (CSV empty or corrupted): {e}")
+
+    # 6. Execution Loop
+    print(f"Starting Benchmark: {args.variant} | {args.model} | {args.dataset}")
+    start_time = time.time()
+    results_list = []
+
+    for i, info in enumerate(selected_images):
+        # info is an ImageInfo object (voc) or patient record (rsna)
+        image_name = info.name if hasattr(info, 'name') else os.path.basename(info)
+        
+        if image_name in processed_images:
+            continue
+
+        try:
+            # Handle RSNA DICOM vs VOC JPEG
+            if args.dataset == 'rsna':
+                img_pil = load_rsna_as_pil(info.path)
+                inp = me.get_transform()(img_pil).unsqueeze(0).to(me.device)
+            else:
+                img_pil, inp = me.get_image_ext(info.path)
             
+            target = torch.argmax(me.model(inp)).item()
+            
+            # Generate SLOC explanation
             sal_numpy = creator.explain(me, inp, target)
             
+            # Evaluate using the 100% Paper Evaluator (8 Metrics)
             m = SLOCPaperEvaluator(me.model, me.device).run(inp, sal_numpy, target, steps=50)
-            m['Image'] = name; results_list.append(m)
+            m['Image'] = image_name
+            results_list.append(m)
             
-            # Incremental Save
-            df_temp = pd.DataFrame([m]); header = not os.path.exists(output_csv)
-            df_temp.to_csv(output_csv, mode='a', header=header, index=False)
+            # Incremental CSV Save
+            pd.DataFrame([m]).to_csv(output_csv, mode='a', header=not os.path.exists(output_csv), index=False)
             
-            print(f"   IDD: {m['IDD']:.4f}, AIC: {m['AIC']:.4f}, NPD: {m['NPD']:.4f}")
-
-            if (i+1) % 100 == 0:
-                visual_filename = f"visuals/res_{args.variant}_{args.model}_{i+1}_{name}.png"
-                # FIX 3: Ensure the numpy array is copied/contiguous before making it a tensor
-                safe_sal = torch.from_numpy(sal_numpy.copy()) 
-                save_visual_result(img_pil, safe_sal, visual_filename)
-                print(f"   Saved visual result to {visual_filename}")
+            print(f"[{i+1}/{len(selected_images)}] {image_name} -> IDD: {m['IDD ↑']:.4f}")
 
         except Exception as e:
-            # <<< SYNTAX FIX: Ensure file operation is on a new line and correctly formatted >>>
-            print(f"   !!! FAILED for {name}: {e}") 
-            with open("failed_images.log", "a") as log_file: 
-                log_file.write(f"{name}: {e}\n")
+            print(f"FAILED for {image_name}: {e}")
+            with open("error_log.txt", "a") as f: f.write(f"{image_name}: {str(e)}\n")
 
-    # Final Report
-    total_time = time.time() - start_time
-    print("\n" + "="*80); print(f"BENCHMARK COMPLETED for {args.variant} in {total_time/3600:.2f} hours"); print("="*80)
-    if os.path.exists(output_csv):
-        df = pd.read_csv(output_csv); print(f"FINAL AVERAGE SCORES ({args.variant}, {args.model}, {NUM_IMAGES} images):")
-        print(df.mean(numeric_only=True).round(4)); print("="*80)
+    print(f"\nBenchmark Complete. Total Time: {(time.time()-start_time)/3600:.2f} hours")
 
 if __name__ == "__main__":
     main()
