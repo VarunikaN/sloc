@@ -5,16 +5,13 @@ import torch.optim as optim
 from PIL import Image
 from matplotlib import pyplot as plt
 
-# ==============================================================================
-#                            CONFIGURATION & SETUP
-# ==============================================================================
+# --- Environment Fixes & Imports ---
 if not hasattr(np, 'trapz'): np.trapz = np.trapezoid
 
 repo_path = "/kaggle/working/sloc"
 src_path = os.path.join(repo_path, "src")
 if src_path not in sys.path: sys.path.insert(0, src_path)
 
-# --- Imports ---
 from models import ModelEnv
 from sloc import SlocExplanationCreator, AutoProbSlocExplanationCreator, MaskedExplanationSum, TotalVariationLoss
 from visutils import showsal
@@ -45,7 +42,9 @@ class SLOCPaperEvaluator:
     def run(self, img_tensor, sal_map, target_idx, steps=50):
         self.model.eval()
         h, w = img_tensor.shape[-2:]
+        
         if isinstance(sal_map, np.ndarray): sal_map = np.ascontiguousarray(sal_map)
+            
         sal_flatten = sal_map.flatten()
         idx_desc = np.argsort(sal_flatten)[::-1]; idx_asc = np.argsort(sal_flatten)
         
@@ -92,8 +91,7 @@ class SlocM_Creator(SlocExplanationCreator):
 
         for epoch in range(501):
             optimizer.zero_grad()
-            output = mexp(data.all_masks)
-            loss = ((output - data.all_pred)**2).mean() + C_TV * tv(mexp.explanation) + C_MAG * mexp.explanation.abs().mean()
+            output = mexp(data.all_masks); loss = ((output - data.all_pred)**2).mean() + C_TV * tv(mexp.explanation) + C_MAG * mexp.explanation.abs().mean()
             loss.backward(); optimizer.step()
 
             if epoch % 50 == 0:
@@ -119,10 +117,11 @@ def main():
     print(f"GPU CHECK: Model is running on device: {me.device}")
     
     # Paper Calibrations
-    p = 0.3 if 'vit' in args.model.lower() else 0.6
+    if 'vit' in args.model.lower(): p = 0.3
+    else: p = 0.6
+        
     config = {'segsize': [16, 32, 48], 'nmasks': [800, 600, 400], 'pprob': [p]*3}
 
-    # Creator Selection
     if args.variant == 'SLOC_m': creator = SlocM_Creator(**config)
     elif args.variant == 'SLOC_xp': creator = SlocExplanationCreator(**config)
     else: creator = AutoProbSlocExplanationCreator(**config)
@@ -131,7 +130,9 @@ def main():
     VOC_ROOT = "/kaggle/input/pascalvoc/VOCdevkit/VOC2012"
     images = get_voc_val_images(VOC_ROOT)
     
-    selected_images = random.sample(images, min(args.num_images, len(images)))
+    if args.num_images > 0: selected_images = random.sample(images, min(args.num_images, len(images)))
+    else: selected_images = images
+    
     NUM_IMAGES = len(selected_images); output_csv = f"sloc_{args.variant.lower()}_{args.model}_voc{NUM_IMAGES}_results.csv"
     if os.path.exists(output_csv): os.remove(output_csv)
 
@@ -140,13 +141,20 @@ def main():
 
     for i, path in enumerate(selected_images):
         name = os.path.basename(path)
-        eta = f" | ETA: {(time.time() - start_time) / i * (NUM_IMAGES - i) / 3600:.2f} hours" if i > 0 else ""
+        
+        eta = ''
+        if i > 0:
+            avg_time = (time.time() - start_time) / i
+            eta_seconds = avg_time * (NUM_IMAGES - i)
+            eta = f" | ETA: {eta_seconds/3600:.2f} hours"
 
         print(f"\n[{i+1}/{NUM_IMAGES}] Processing {name}...{eta}")
         
         try:
             img_pil, inp = me.get_image_ext(path); target = torch.argmax(me.model(inp)).item()
+            
             sal_numpy = creator.explain(me, inp, target)
+            
             m = SLOCPaperEvaluator(me.model, me.device).run(inp, sal_numpy, target, steps=50)
             m['Image'] = name; results_list.append(m)
             
@@ -162,7 +170,10 @@ def main():
                 print(f"   Saved visual result to {visual_filename}")
 
         except Exception as e:
-            print(f"   !!! FAILED for {name}: {e}"); with open("failed_images.log", "a") as log_file: log_file.write(f"{name}: {e}\n")
+            # <<< SYNTAX FIX: Ensure file operation is on a new line and correctly formatted >>>
+            print(f"   !!! FAILED for {name}: {e}") 
+            with open("failed_images.log", "a") as log_file: 
+                log_file.write(f"{name}: {e}\n")
 
     # Final Report
     total_time = time.time() - start_time
