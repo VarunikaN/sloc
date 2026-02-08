@@ -213,7 +213,8 @@ def main():
             # ---------------------------------
 
             print(f"[{i+1}/{len(selected_images)}] {image_name} (GT: {info.target})")
-            print(f"   IDD ↑: {m['IDD']:.4f} | AIC ↑: {m['AIC']:.4f} | NPD ↑: {m['NPD']:.4f}")
+            print(f"   IDD ↑: {m['IDD']:.4f} | NPD ↑: {m['NPD']:.4f} | AIC ↑: {m['AIC']:.4f} | SIC ↑: {m['SIC']:.4f}")
+            print(f"   DEL ↓: {m['DEL']:.4f} | INS ↑: {m['INS']:.4f} | POS ↓: {m['POS']:.4f} | NEG ↑: {m['NEG']:.4f}")
 
             # Incremental Save
             pd.DataFrame([m]).to_csv(output_csv, mode='a', header=not os.path.exists(output_csv), index=False)
