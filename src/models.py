@@ -20,24 +20,19 @@ class ModelEnv:
         if arch.startswith('voc_'):
             model_arch = arch.replace('voc_','')
             model = torchray.benchmark.models.get_model(arch=model_arch, dataset="voc", convert_to_fully_convolutional=False)
-
-        elif arch == 'vgg16NT':
-            model = torchvision.models.vgg16(pretrained=False)
-        elif arch == 'vgg16RT':            
-            model = torchvision.models.vgg16(pretrained=False)
-            output_weights_path = 'models/vgg16_retrained_n.pth'
-            model.load_state_dict(torch.load(output_weights_path))
-
-        elif 'resnet' in arch or 'vgg' in arch:
-        # Get a network pre-trained on ImageNet.
-            model = torchvision.models.__dict__[arch](pretrained=True)
-            #for param in model.parameters():
-            #    param.requires_grad_(False)        
-        elif 'vit' in arch or 'convnext' in arch or 'densenet' in arch:
-            model = timm.create_model(arch, pretrained=True)
-        else:
-            assert False, "unexpected arch"
         
+        # Check torchvision first for classic models
+        elif arch in torchvision.models.__dict__:
+            model = torchvision.models.__dict__[arch](weights='DEFAULT')
+            
+        # Fallback to timm for modern/custom models (ConvNeXt, Swin, EfficientNet, RegNet, MobileNet)
+        else:
+            try:
+                model = timm.create_model(arch, pretrained=True)
+            except Exception as e:
+                print(f"Error loading {arch}: {e}")
+                assert False, f"Architecture {arch} not found in torchvision or timm"
+
         model.eval()        
         model = model.to(dev)
         return model
@@ -57,20 +52,24 @@ class ModelEnv:
         return nn.Sequential(*modules)
         
     def get_cam_target_layer(self):
-        if self.arch == 'resnet50':
+        a = self.arch.lower()
+        if 'resnet' in a:
             return self.model.layer4[-1]
-            #return self.model.layer4
-        
-        elif self.arch == 'vgg16':
+        elif 'vgg' in a or 'mobilenet' in a:
             return self.model.features[-1]
-
-        elif self.arch == 'densenet201':
-            return self.model.features[-1]
-
-        elif self.arch == 'convnext_base':
+        elif 'densenet' in a:
+            return self.model.features.norm5
+        elif 'convnext' in a:
             return self.model.stages[-1].blocks[-1]
-                        
-        raise Exception('Unexpected arch')
+        elif 'efficientnet' in a:
+            return self.model.conv_head
+        elif 'swin' in a:
+            return self.model.layers[-1].blocks[-1]
+        elif 'regnet' in a:
+            # For torchvision regnet
+            return self.model.trunk_output[-1]
+            
+        raise Exception(f'Target layer not defined for arch: {self.arch}')
     
     def get_cex_conv_layer(self):
         
