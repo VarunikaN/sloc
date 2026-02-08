@@ -5,7 +5,7 @@ import torch.optim as optim
 from PIL import Image
 from matplotlib import pyplot as plt
 
-#  Environment Fixes & Imports 
+# --- Environment Fixes & Imports ---
 if not hasattr(np, 'trapz'): np.trapz = np.trapezoid
 
 repo_path = "/kaggle/working/sloc"
@@ -13,23 +13,19 @@ src_path = os.path.join(repo_path, "src")
 if src_path not in sys.path: sys.path.insert(0, src_path)
 
 from models import ModelEnv
-from sloc import SlocExplanationCreator, AutoProbSlocExplanationCreator, MaskedExplanationSum, TotalVariationLoss
+from sloc import SlocExplanationCreator, MaskedExplanationSum, TotalVariationLoss
 from visutils import showsal
 
 def get_voc_val_images(voc_root):
-    # Path based on your !ls output
     val_set_file = os.path.join(voc_root, 'ImageSets/Main/val.txt')
     jpeg_dir = os.path.join(voc_root, 'JPEGImages')
-    
-    if not os.path.exists(val_set_file):
-        raise FileNotFoundError(f"VOC val.txt not found at {val_set_file}")
-        
-    with open(val_set_file, 'r') as f:
-        image_ids = [line.strip() for line in f.readlines()]
-    
+    if not os.path.exists(val_set_file): raise FileNotFoundError(f"VOC val.txt not found at {val_set_file}")
+    with open(val_set_file, 'r') as f: image_ids = [line.strip() for line in f.readlines()]
     return [os.path.join(jpeg_dir, f"{img_id}.jpg") for img_id in image_ids]
 
+# ==============================================================================
 # EXPERIMENT 1: THE 8-METRIC EVALUATOR (100% PAPER MATCH)
+# ==============================================================================
 
 class SLOCPaperEvaluator:
     def __init__(self, model, device):
@@ -40,15 +36,14 @@ class SLOCPaperEvaluator:
         self.model.eval()
         h, w = img_tensor.shape[-2:]
         
-        # FIX for ValueError: Negative Strides
+        # FIX for ValueError: Negative Strides. Force NumPy array to be contiguous.
         if isinstance(sal_map, np.ndarray):
-            sal_map = np.ascontiguousarray(sal_map).copy()
+            sal_map = np.ascontiguousarray(sal_map)
             
         sal_flatten = sal_map.flatten()
         idx_desc = np.argsort(sal_flatten)[::-1] # High to Low (Importance)
         idx_asc = np.argsort(sal_flatten)        # Low to High (Noise)
         
-        # Baselines per paper: Deletion/Negative = Blur; Insertion/Positive = Black
         black_base = torch.zeros_like(img_tensor).to(self.device)
         blur_base = self.blur(img_tensor).to(self.device)
         
@@ -56,28 +51,30 @@ class SLOCPaperEvaluator:
         step_size = len(idx_desc) // steps
 
         with torch.no_grad():
+            # IMPORTANT: Get contiguous views of the flat tensors ONCE
+            img_flat = img_tensor.view(1, 3, -1).contiguous()
+            blur_flat = blur_base.view(1, 3, -1).contiguous()
+            black_flat = black_base.view(1, 3, -1).contiguous()
+
             for i in range(steps + 1):
                 n = min(i * step_size, len(idx_desc))
                 top_idx = idx_desc[:n]
                 bot_idx = idx_asc[:n]
 
-                # INS: Start Black, Add Top Pixels
-                img_ins = black_base.clone().view(1, 3, -1)
-                img_ins[:, :, top_idx] = img_tensor.view(1, 3, -1)[:, :, top_idx]
-                
-                # DEL: Start Orig, Remove Top Pixels (Replace with Blur)
-                img_del = img_tensor.clone().view(1, 3, -1)
-                img_del[:, :, top_idx] = blur_base.view(1, 3, -1)[:, :, top_idx]
+                # 1. INS/POS: Start Black, Add Top Pixels
+                img_ins = black_flat.clone() # Start with a clone of black
+                img_ins[:, :, top_idx] = img_flat[:, :, top_idx] # Assign values
 
-                # NEG: Start Orig, Remove LEAST important pixels (Replace with Blur)
-                img_neg = img_tensor.clone().view(1, 3, -1)
-                img_neg[:, :, bot_idx] = blur_base.view(1, 3, -1)[:, :, bot_idx]
+                # 2. DEL: Start Orig, Replace Top Pixels with Blur
+                img_del = img_flat.clone() # Start with a clone of original
+                img_del[:, :, top_idx] = blur_flat[:, :, top_idx]
 
-                # POS: Defined identically to DEL in this specific paper protocol
-                img_pos = img_del 
+                # 3. NEG: Start Orig, Remove LEAST important pixels (Replace with Blur)
+                img_neg = img_flat.clone()
+                img_neg[:, :, bot_idx] = blur_flat[:, :, bot_idx]
 
                 # Process
-                for k, img in zip(["ins", "del", "neg", "pos"], [img_ins, img_del, img_neg, img_pos]):
+                for k, img in zip(["ins", "del", "neg", "pos"], [img_ins, img_del, img_neg, img_ins]):
                     out = torch.softmax(self.model(img.view(1, 3, h, w)), dim=1)
                     prob = out[0, target_idx].item()
                     curves[k].append(prob)
@@ -87,9 +84,9 @@ class SLOCPaperEvaluator:
 
         auc = {k: np.trapz(v, dx=1/steps) for k, v in curves.items()}
         return {
-            "DEL ↓": auc["del"], "INS ↑": auc["ins"], "IDD ↑": auc["ins"] - auc["del"],
-            "POS ↓": auc["pos"], "NEG ↑": auc["neg"], "NPD ↑": auc["neg"] - auc["pos"],
-            "AIC ↑": auc["aic"], "SIC ↑": auc["sic"]
+            "DEL": auc["del"], "INS": auc["ins"], "IDD": auc["ins"] - auc["del"],
+            "POS": auc["pos"], "NEG": auc["neg"], "NPD": auc["neg"] - auc["pos"],
+            "AIC": auc["aic"], "SIC": auc["sic"]
         }
 
 # SLOC_m VARIANT (MONITORING IDD EVERY 50 EPOCHS)
@@ -116,9 +113,8 @@ class SlocM_Creator(SlocExplanationCreator):
             optimizer.step()
 
             if epoch % 50 == 0:
-                # <<< FIX: Ensure saved tensor is a contiguous NumPy array >>>
+                # Ensure saved tensor is a contiguous NumPy array
                 cur_sal = np.ascontiguousarray(mexp.explanation.detach().cpu().numpy())
-                # -
                 metrics = evaluator.run(inp, cur_sal, catidx, steps=10)
                 current_idd = metrics["IDD"]
                 if current_idd > state['best_idd']:
@@ -138,6 +134,7 @@ def main():
     
     args = parser.parse_args()
 
+    # Load Model Environment
     me = ModelEnv(args.model)
     print(f"GPU CHECK: Model is running on device: {me.device}")
     
@@ -205,9 +202,7 @@ def main():
 
     # Final Report
     total_time = time.time() - start_time
-    print("\n" + "="*80)
     print(f"BENCHMARK COMPLETED for {args.variant} in {total_time/3600:.2f} hours")
-    print("="*80)
     if os.path.exists(output_csv):
         df = pd.read_csv(output_csv)
         print(f"FINAL AVERAGE SCORES ({args.variant}, {args.model}, {NUM_IMAGES} images):")
