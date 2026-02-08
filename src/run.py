@@ -201,11 +201,23 @@ def main():
 
     # 4. Dataset Loading (Switch to Bone Age)
     if args.dataset == 'rsna_boneage':
-        # Path for Kaggle RSNA Bone Age Dataset
-        BONEAGE_ROOT = "/kaggle/input/rsna-bone-age" 
+        # Path to your downloaded data
+        BONEAGE_ROOT = './rsna-boneage-data' 
         from dataset import RSNABoneAgeSource, load_boneage_as_pil
-        source = RSNABoneAgeSource(BONEAGE_ROOT)
+        
+        # We target the training split since it has the labels
+        source = RSNABoneAgeSource(BONEAGE_ROOT, split='train')
         all_images = list(source.get_all_images().values())
+        
+        # 5. FIXED SEED SAMPLING
+        # This is the most important part for model comparison!
+        random.seed(1234) 
+        if args.num_images > 0:
+            selected_images = random.sample(all_images, min(args.num_images, len(all_images)))
+        else:
+            selected_images = all_images
+        
+        print(f"Comparison ready: All models will test on the same {len(selected_images)} images.")
     else:
         VOC_ROOT = "/kaggle/input/pascalvoc/VOCdevkit/VOC2012"
         all_images = get_voc_val_images(VOC_ROOT) 

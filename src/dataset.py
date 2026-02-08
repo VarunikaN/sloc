@@ -11,7 +11,7 @@ import pandas as pd
 import numpy as np
 
 class RSNABoneAgeSource:
-    def __init__(self, base_path):
+    def __init__(self, base_path, split='train'):
         self.base_path = base_path
         self.image_dir = os.path.join(base_path, 'training-dataset')
         self.csv_path = os.path.join(base_path, 'train.csv')
@@ -23,7 +23,6 @@ class RSNABoneAgeSource:
             img_id = str(row['id'])
             path = os.path.join(self.image_dir, f"{img_id}.png")
             if os.path.exists(path):
-                # target is boneage in months
                 images[img_id] = ImageInfo(
                     path=path, 
                     name=img_id, 
