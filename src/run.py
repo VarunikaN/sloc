@@ -126,7 +126,7 @@ class SlocM_Creator(SlocExplanationCreator):
 def main():
     parser = argparse.ArgumentParser(description="Run SLOC Benchmark with RSNA/VOC support.")
     parser.add_argument('--variant', type=str, default='SLOC_m', choices=['SLOC', 'SLOC_xp', 'SLOC_m'])
-    parser.add_argument('--model', type=str, default='resnet50', help="resnet50, densenet201, or vit_base_patch16_224")
+    parser.add_argument('--model', type=str, default='resnet50', help="resnet50 or vit_base_patch16_224")
     parser.add_argument('--dataset', type=str, default='voc', choices=['voc', 'rsna'])
     parser.add_argument('--num_images', type=int, default=1000)
     parser.add_argument('--resume', action='store_true', help="Skip images already present in results CSV")
@@ -137,8 +137,8 @@ def main():
     me = ModelEnv(args.model)
     print(f"GPU CHECK: Model {args.model} is running on: {me.device}")
     
-    # 2. Paper Calibrations for Architecture
-    # ViT density p=0.3, CNN density p=0.6 (Section 4.1)
+    # 2. Paper Calibrations for Architecture (Section 4.1)
+    # ViT density p=0.3, CNN density p=0.6 
     if 'vit' in args.model.lower(): 
         p = 0.3
     else: 
@@ -154,15 +154,17 @@ def main():
     else: 
         creator = AutoProbSlocExplanationCreator(**config)
 
+    # 4. Dataset Loading (Using classes in datasets.py)
     if args.dataset == 'rsna':
         RSNA_ROOT = "/kaggle/input/rsna-pneumonia-detection-challenge"
         source = RSNASource(RSNA_ROOT)
-        all_images = list(source.get_all_images().values())
+        all_images_dict = source.get_all_images()
+        all_images = list(all_images_dict.values())
     else:
         VOC_ROOT = "/kaggle/input/pascalvoc/VOCdevkit/VOC2012"
-        all_images = get_voc_val_images(VOC_ROOT) 
+        all_images = get_voc_val_images(VOC_ROOT) # Using official val.txt split
     
-    # 5. Sampling and Resume Logic
+    # 5. Sampling and Output Setup
     if args.num_images > 0:
         selected_images = random.sample(all_images, min(args.num_images, len(all_images)))
     else:
@@ -170,6 +172,7 @@ def main():
         
     output_csv = f"sloc_{args.variant.lower()}_{args.model}_{args.dataset}_results.csv"
     
+    # Checkpoint/Resume Logic
     processed_images = set()
     if args.resume and os.path.exists(output_csv):
         try:
@@ -182,39 +185,36 @@ def main():
     # 6. Execution Loop
     print(f"Starting Benchmark: {args.variant} | {args.model} | {args.dataset}")
     start_time = time.time()
-    results_list = []
 
     for i, info in enumerate(selected_images):
-        # info is an ImageInfo object (voc) or patient record (rsna)
-        image_name = info.name if hasattr(info, 'name') else os.path.basename(info)
+        image_name = info.name # Works for both VOC ImageInfo and RSNA ImageInfo
         
         if image_name in processed_images:
             continue
 
         try:
-            # Handle RSNA DICOM vs VOC JPEG
+            # Handle RSNA DICOM vs VOC JPEG loading
             if args.dataset == 'rsna':
+                from datasets import load_rsna_as_pil # Ensure this is imported
                 img_pil = load_rsna_as_pil(info.path)
-                # Manually apply model transform since me.get_image_ext is for JPEGs
                 inp = me.get_transform()(img_pil).unsqueeze(0).to(me.device)
             else:
                 img_pil, inp = me.get_image_ext(info.path)
             
             target = torch.argmax(me.model(inp)).item()
             
-            # Generate SLOC explanation
+            # Generate SLOC explanation (Paper logic)
             sal_numpy = creator.explain(me, inp, target)
             
             # Evaluate using the 100% Paper Evaluator (8 Metrics)
             m = SLOCPaperEvaluator(me.model, me.device).run(inp, sal_numpy, target, steps=50)
             m['Image'] = image_name
-            print(f"   [RESULT] IDD ↑: {m['IDD']:.4f} | NPD ↑: {m['NPD']:.4f} | AIC ↑: {m['AIC']:.4f} | SIC ↑: {m['SIC']:.4f}")
-            results_list.append(m)
             
-            # Incremental CSV Save
+            # Print metrics to console for monitoring
+            print(f"[{i+1}/{len(selected_images)}] {image_name} -> IDD ↑: {m['IDD']:.4f} | AIC ↑: {m['AIC']:.4f}")
+            
+            # Incremental CSV Save (Checkpointing)
             pd.DataFrame([m]).to_csv(output_csv, mode='a', header=not os.path.exists(output_csv), index=False)
-            
-            print(f"[{i+1}/{len(selected_images)}] {image_name} -> IDD: {m['IDD ↑']:.4f}")
 
         except Exception as e:
             print(f"FAILED for {image_name}: {e}")
