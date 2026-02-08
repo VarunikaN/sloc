@@ -5,7 +5,7 @@ import torch.optim as optim
 from PIL import Image
 from matplotlib import pyplot as plt
 
-# --- Environment Fixes & Imports ---
+# --- Environment Fixes & Imports (Keeping this for context) ---
 if not hasattr(np, 'trapz'): np.trapz = np.trapezoid
 
 repo_path = "/kaggle/working/sloc"
@@ -36,13 +36,12 @@ class SLOCPaperEvaluator:
         self.model.eval()
         h, w = img_tensor.shape[-2:]
         
-        # FIX for ValueError: Negative Strides. Force NumPy array to be contiguous.
-        if isinstance(sal_map, np.ndarray):
-            sal_map = np.ascontiguousarray(sal_map)
+        # Ensure sal_map is a contiguous NumPy array
+        if isinstance(sal_map, np.ndarray): sal_map = np.ascontiguousarray(sal_map)
             
         sal_flatten = sal_map.flatten()
-        idx_desc = np.argsort(sal_flatten)[::-1] # High to Low (Importance)
-        idx_asc = np.argsort(sal_flatten)        # Low to High (Noise)
+        idx_desc = np.argsort(sal_flatten)[::-1]
+        idx_asc = np.argsort(sal_flatten)
         
         black_base = torch.zeros_like(img_tensor).to(self.device)
         blur_base = self.blur(img_tensor).to(self.device)
@@ -51,10 +50,11 @@ class SLOCPaperEvaluator:
         step_size = len(idx_desc) // steps
 
         with torch.no_grad():
-            # IMPORTANT: Get contiguous views of the flat tensors ONCE
-            img_flat = img_tensor.view(1, 3, -1).contiguous()
-            blur_flat = blur_base.view(1, 3, -1).contiguous()
-            black_flat = black_base.view(1, 3, -1).contiguous()
+            # <<< THE FINAL FIX >>>
+            # Force the flat tensors to be contiguous memory blocks for the assignment to work
+            img_flat = img_tensor.view(1, 3, -1).clone().contiguous()
+            blur_flat = blur_base.view(1, 3, -1).clone().contiguous()
+            black_flat = black_base.view(1, 3, -1).clone().contiguous()
 
             for i in range(steps + 1):
                 n = min(i * step_size, len(idx_desc))
@@ -62,14 +62,14 @@ class SLOCPaperEvaluator:
                 bot_idx = idx_asc[:n]
 
                 # 1. INS/POS: Start Black, Add Top Pixels
-                img_ins = black_flat.clone() # Start with a clone of black
-                img_ins[:, :, top_idx] = img_flat[:, :, top_idx] # Assign values
+                img_ins = black_flat.clone()
+                img_ins[:, :, top_idx] = img_flat[:, :, top_idx]
 
                 # 2. DEL: Start Orig, Replace Top Pixels with Blur
-                img_del = img_flat.clone() # Start with a clone of original
+                img_del = img_flat.clone()
                 img_del[:, :, top_idx] = blur_flat[:, :, top_idx]
 
-                # 3. NEG: Start Orig, Remove LEAST important pixels (Replace with Blur)
+                # 3. NEG: Start Orig, Remove LEAST important pixels with Blur
                 img_neg = img_flat.clone()
                 img_neg[:, :, bot_idx] = blur_flat[:, :, bot_idx]
 
@@ -113,7 +113,6 @@ class SlocM_Creator(SlocExplanationCreator):
             optimizer.step()
 
             if epoch % 50 == 0:
-                # Ensure saved tensor is a contiguous NumPy array
                 cur_sal = np.ascontiguousarray(mexp.explanation.detach().cpu().numpy())
                 metrics = evaluator.run(inp, cur_sal, catidx, steps=10)
                 current_idd = metrics["IDD"]
@@ -134,11 +133,9 @@ def main():
     
     args = parser.parse_args()
 
-    # Load Model Environment
     me = ModelEnv(args.model)
     print(f"GPU CHECK: Model is running on device: {me.device}")
     
-    # Paper Calibrations for SLOC/SLOC_xp/SLOC_m
     if 'vit' in args.model.lower(): p = 0.3
     else: p = 0.6
         
@@ -148,7 +145,6 @@ def main():
     elif args.variant == 'SLOC_xp': creator = SlocExplanationCreator(**config)
     else: creator = AutoProbSlocExplanationCreator(**config)
 
-    # Dataset: PASCAL VOC 2012
     VOC_ROOT = "/kaggle/input/pascalvoc/VOCdevkit/VOC2012"
     images = get_voc_val_images(VOC_ROOT)
     
@@ -202,7 +198,9 @@ def main():
 
     # Final Report
     total_time = time.time() - start_time
+    print("\n" + "="*80)
     print(f"BENCHMARK COMPLETED for {args.variant} in {total_time/3600:.2f} hours")
+    print("="*80)
     if os.path.exists(output_csv):
         df = pd.read_csv(output_csv)
         print(f"FINAL AVERAGE SCORES ({args.variant}, {args.model}, {NUM_IMAGES} images):")
