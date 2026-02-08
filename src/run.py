@@ -43,10 +43,14 @@ class SLOCPaperEvaluator:
         self.model.eval()
         h, w = img_tensor.shape[-2:]
         
-        if isinstance(sal_map, np.ndarray): sal_map = np.ascontiguousarray(sal_map)
+        # FIX 1: Ensure the saliency map is contiguous before processing
+        if isinstance(sal_map, np.ndarray):
+            sal_map = np.ascontiguousarray(sal_map)
             
         sal_flatten = sal_map.flatten()
-        idx_desc = np.argsort(sal_flatten)[::-1]; idx_asc = np.argsort(sal_flatten)
+        # FIX 2: Explicitly copy flipped/sorted indices to avoid negative strides
+        idx_desc = np.argsort(sal_flatten)[::-1].copy() 
+        idx_asc = np.argsort(sal_flatten).copy()
         
         black_base = torch.zeros_like(img_tensor).to(self.device)
         blur_base = self.blur(img_tensor).to(self.device)
@@ -55,17 +59,24 @@ class SLOCPaperEvaluator:
         step_size = len(idx_desc) // steps
 
         with torch.no_grad():
-            img_flat = img_tensor.view(1, 3, -1).clone().contiguous()
-            blur_flat = blur_base.view(1, 3, -1).clone().contiguous()
-            black_flat = black_base.view(1, 3, -1).clone().contiguous()
+            # Ensure tensors are contiguous for the view operation
+            img_flat = img_tensor.view(1, 3, -1).contiguous()
+            blur_flat = blur_base.view(1, 3, -1).contiguous()
+            black_flat = black_base.view(1, 3, -1).contiguous()
 
             for i in range(steps + 1):
                 n = min(i * step_size, len(idx_desc))
-                top_idx = idx_desc[:n]; bot_idx = idx_asc[:n]
+                top_idx = idx_desc[:n]
+                bot_idx = idx_asc[:n]
 
-                img_ins = black_flat.clone(); img_ins[:, :, top_idx] = img_flat[:, :, top_idx]
-                img_del = img_flat.clone(); img_del[:, :, top_idx] = blur_flat[:, :, top_idx]
-                img_neg = img_flat.clone(); img_neg[:, :, bot_idx] = blur_flat[:, :, bot_idx]
+                img_ins = black_flat.clone()
+                img_ins[:, :, top_idx] = img_flat[:, :, top_idx]
+                
+                img_del = img_flat.clone()
+                img_del[:, :, top_idx] = blur_flat[:, :, top_idx]
+                
+                img_neg = img_flat.clone()
+                img_neg[:, :, bot_idx] = blur_flat[:, :, bot_idx]
 
                 for k, img in zip(["ins", "del", "neg", "pos"], [img_ins, img_del, img_neg, img_ins]):
                     out = torch.softmax(self.model(img.view(1, 3, h, w)), dim=1)
@@ -76,7 +87,7 @@ class SLOCPaperEvaluator:
                         curves["sic"].append(prob)
 
         auc = {k: np.trapz(v, dx=1/steps) for k, v in curves.items()}
-        return {"DEL": auc["del"], "INS": auc["ins"], "IDD": auc["ins"] - auc["del"], "POS": auc["pos"], "NEG": auc["neg"], "NPD": auc["neg"] - auc["pos"], "AIC": auc["aic"], "SIC": auc["sic"]}
+        return auc
 
 # --- 2. SLOC_m Creator (Monitoring IDD) ---
 class SlocM_Creator(SlocExplanationCreator):
@@ -166,7 +177,9 @@ def main():
 
             if (i+1) % 100 == 0:
                 visual_filename = f"visuals/res_{args.variant}_{args.model}_{i+1}_{name}.png"
-                save_visual_result(img_pil, torch.tensor(sal_numpy), visual_filename)
+                # FIX 3: Ensure the numpy array is copied/contiguous before making it a tensor
+                safe_sal = torch.from_numpy(sal_numpy.copy()) 
+                save_visual_result(img_pil, safe_sal, visual_filename)
                 print(f"   Saved visual result to {visual_filename}")
 
         except Exception as e:
