@@ -13,30 +13,22 @@ import argparse
 # ==============================================================================
 #                            CONFIGURATION
 # ==============================================================================
-# This script is now driven by command-line arguments.
-# See the --help flag for options.
-# ==============================================================================
 
 # --- Pre-Flight Check & Setup ---
 def setup_environment():
     """Ensures the environment is ready for the benchmark."""
     if 'src' not in os.getcwd():
-        if os.path.exists('sloc/src'):
-            os.chdir('sloc')
-        else:
-            raise FileNotFoundError("CRITICAL ERROR: Please run this script from the root of the 'sloc' repository.")
+        if os.path.exists('sloc/src'): os.chdir('sloc')
+        else: raise FileNotFoundError("CRITICAL ERROR: Please run this script from the root of the 'sloc' repository.")
     
     models_path = 'src/models.py'
     try:
         with open(models_path, 'r') as f: content = f.read()
         if 'torchray' in content and '# import timm, torchray' not in content:
-            print("Patching 'src/models.py' to remove 'torchray' import...")
             content = content.replace('import timm, torchray', '# import timm, torchray')
             content = content.replace('import torchray.benchmark', '# import torchray.benchmark')
             with open(models_path, 'w') as f: f.write(content)
-            print("Patch applied successfully.")
-    except Exception as e:
-        print(f"Could not patch models.py: {e}")
+    except Exception as e: pass # Already patched or error in setup
     
     warnings.filterwarnings("ignore")
     os.makedirs("visuals", exist_ok=True)
@@ -84,7 +76,7 @@ class XAIMetrics:
         results["IDD"], results["NPD"] = results["INS"] - results["DEL"], results["NEG"] - results["POS"]
         return results
 
-# --- 2. SLOC_m Creator (with monitoring) ---
+# --- 2. SLOC_m Creator (Monitoring/Best-of-Epoch) ---
 class SlocM_ExplanationCreator(SlocExplanationCreator):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -141,25 +133,33 @@ def save_visual_result(img_pil, sal_tensor, filename):
 
 # --- 4. Main Execution Block ---
 def main(args):
+    # Determine Model-Specific Probability (p) for SLOC_xp and SLOC_m
+    if 'vit' in args.model.lower():
+        pprob_value = 0.3 # ViT uses a lower probability for better results
+    else:
+        pprob_value = 0.6 # ResNet50 and DenseNet201 use 0.6
+        
+    pprob_config = [pprob_value] * 3 
+    
     # Setup models and evaluators
     me = ModelEnv(args.model)
     print(f"GPU CHECK: Model is running on device: {me.device}")
     evaluator = XAIMetrics(me.model, me.device)
-    creator = None
 
     # Paper's recommended high-quality settings
     config = {'segsize': [16, 32, 48], 'nmasks': [800, 600, 400], 'epochs': 500, 'c_tv': 0.05, 'c_magnitude': 0.01, 'lr': 0.1}
 
     # Instantiate the correct creator based on the chosen variant
     if args.variant == 'SLOC_xp':
-        print("Initializing SLOC_xp (Fixed Probability)")
-        creator = SlocExplanationCreator(pprob=[0.6, 0.6, 0.6], **config)
+        print(f"Initializing SLOC_xp (Fixed Probability p={pprob_value})")
+        creator = SlocExplanationCreator(pprob=pprob_config, **config)
     elif args.variant == 'SLOC':
         print("Initializing SLOC (Auto-Tuning Probability)")
-        creator = AutoProbSlocExplanationCreator(**config)
+        # Note: AutoProbSlocCreator will run its own tuning, ignoring the pprob config here.
+        creator = AutoProbSlocExplanationCreator(**config) 
     elif args.variant == 'SLOC_m':
-        print("Initializing SLOC_m (Best-of-Epoch Monitoring)")
-        creator = SlocM_ExplanationCreator(pprob=[0.6, 0.6, 0.6], **config)
+        print(f"Initializing SLOC_m (Monitoring, Fixed Probability p={pprob_value})")
+        creator = SlocM_ExplanationCreator(pprob=pprob_config, **config)
 
     # Load and sample the dataset
     VOC_ROOT = "/kaggle/input/pascalvoc/VOCdevkit/VOC2012"
@@ -234,11 +234,11 @@ def main(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Run the SLOC benchmark on the PASCAL VOC 2012 dataset.")
     parser.add_argument('--variant', type=str, default='SLOC_m', choices=['SLOC_xp', 'SLOC', 'SLOC_m'],
-                        help="The SLOC variant to run.")
+                        help="The SLOC variant to run (SLOC_xp: fixed p, SLOC: auto-tune p, SLOC_m: best-of-epoch).")
     parser.add_argument('--model', type=str, default='resnet50',
                         help="The model architecture to use (e.g., 'resnet50', 'densenet201', 'vit_base_patch16_224').")
     parser.add_argument('--num_images', type=int, default=-1,
-                        help="Number of images to sample from the dataset. Set to -1 to use all available images.")
+                        help="Number of images to sample from the dataset. Set to -1 to use all available images (5823).")
     
     args = parser.parse_args()
     main(args)
