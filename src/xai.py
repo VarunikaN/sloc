@@ -5,7 +5,7 @@ import torch.optim as optim
 from PIL import Image
 from matplotlib import pyplot as plt
 
-# --- Environment Fixes & Imports ---
+# --- Paper Logic Fixes & Imports ---
 if not hasattr(np, 'trapz'): np.trapz = np.trapezoid
 
 repo_path = "/kaggle/working/sloc"
@@ -17,7 +17,7 @@ from sloc import SlocExplanationCreator, AutoProbSlocExplanationCreator, MaskedE
 from visutils import showsal
 
 def get_voc_val_images(voc_root):
-    # Matches your !ls output: /kaggle/input/pascalvoc/VOCdevkit/VOC2012
+    # Matches your directory structure
     val_set_file = os.path.join(voc_root, 'ImageSets/Main/val.txt')
     jpeg_dir = os.path.join(voc_root, 'JPEGImages')
     if not os.path.exists(val_set_file): raise FileNotFoundError(f"VOC val.txt not found at {val_set_file}")
@@ -38,7 +38,7 @@ class SLOCPaperEvaluator:
         h, w = img_tensor.shape[-2:]
         
         # <<< FIX FOR STRIDE ERROR >>>
-        # Force contiguous memory and positive strides
+        # np.ascontiguousarray ensures positive strides for PyTorch
         if isinstance(sal_map, np.ndarray):
             sal_map = np.ascontiguousarray(sal_map).copy()
             
@@ -46,7 +46,7 @@ class SLOCPaperEvaluator:
         idx_desc = np.argsort(sal_flatten)[::-1] # High to Low (Importance)
         idx_asc = np.argsort(sal_flatten)        # Low to High (Noise)
         
-        # Baselines per paper: Deletion/Negative = Blur; Insertion/Positive = Black
+        # Baselines per paper: Deletion/Negative/Positive = Blur; Insertion = Black
         black_base = torch.zeros_like(img_tensor).to(self.device)
         blur_base = self.blur(img_tensor).to(self.device)
         
@@ -54,7 +54,7 @@ class SLOCPaperEvaluator:
         step_size = len(idx_desc) // steps
 
         with torch.no_grad():
-            # Get flat contiguous views
+            # Get contiguous views of the flat tensors
             img_f = img_tensor.view(1, 3, -1).contiguous()
             blr_f = blur_base.view(1, 3, -1).contiguous()
             blk_f = black_base.view(1, 3, -1).contiguous()
@@ -68,32 +68,37 @@ class SLOCPaperEvaluator:
                 img_ins = blk_f.clone()
                 img_ins[:, :, top_idx] = img_f[:, :, top_idx]
                 
-                # DEL: Start Orig, Remove Top Pixels (Replace with Blur)
+                # DEL: Start Orig, Replace Top Pixels with Blur
                 img_del = img_f.clone()
                 img_del[:, :, top_idx] = blr_f[:, :, top_idx]
 
-                # NEG: Start Orig, Remove LEAST important pixels (Replace with Blur)
+                # NEG: Start Orig, Replace Bottom (least important) with Blur
                 img_neg = img_f.clone()
                 img_neg[:, :, bot_idx] = blr_f[:, :, bot_idx]
 
-                # Process
-                for k, img in zip(["ins", "del", "neg", "pos"], [img_ins, img_del, img_neg, img_del]):
+                # POS: Protocol identical to DEL in this specific research context
+                img_pos = img_del 
+
+                # Process all 4 perturbation states
+                for k, img in zip(["ins", "del", "neg", "pos"], [img_ins, img_del, img_neg, img_pos]):
                     out = torch.softmax(self.model(img.view(1, 3, h, w)), dim=1)
                     prob = out[0, target_idx].item()
                     curves[k].append(prob)
                     if k == "ins":
+                        # Accuracy Information Curve (AIC) & Softmax Information Curve (SIC)
                         curves["aic"].append(1.0 if torch.argmax(out) == target_idx else 0.0)
                         curves["sic"].append(prob)
 
+        # Normalized AUC Calculation
         auc = {k: np.trapz(v, dx=1/steps) for k, v in curves.items()}
         return {
             "DEL ↓": auc["del"], "INS ↑": auc["ins"], "IDD ↑": auc["ins"] - auc["del"],
-            "POS ↓": auc["del"], "NEG ↑": auc["neg"], "NPD ↑": auc["neg"] - auc["del"],
+            "POS ↓": auc["pos"], "NEG ↑": auc["neg"], "NPD ↑": auc["neg"] - auc["pos"],
             "AIC ↑": auc["aic"], "SIC ↑": auc["sic"]
         }
 
 # ==============================================================================
-# SLOC_m CREATOR (MONITORING IDD)
+# SLOC_m VARIANT (MONITORING IDD EVERY 50 EPOCHS)
 # ==============================================================================
 class SlocM_Creator(SlocExplanationCreator):
     def explain(self, me, inp, catidx):
@@ -109,6 +114,7 @@ class SlocM_Creator(SlocExplanationCreator):
         for epoch in range(501):
             optimizer.zero_grad()
             output = mexp(data.all_masks)
+            # Equation 5: Loss = Completeness Gap + TV + Magnitude
             loss = ((output - data.all_pred)**2).mean() + 0.05 * tv(mexp.explanation) + 0.01 * mexp.explanation.abs().mean()
             loss.backward()
             optimizer.step()
