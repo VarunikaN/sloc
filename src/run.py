@@ -8,13 +8,13 @@ from matplotlib import pyplot as plt
 # --- Environment Fixes & Imports ---
 if not hasattr(np, 'trapz'): np.trapz = np.trapezoid
 
+# Adjust paths for your environment
 repo_path = "/kaggle/working/sloc"
 src_path = os.path.join(repo_path, "src")
 if src_path not in sys.path: sys.path.insert(0, src_path)
 
 from models import ModelEnv
 from sloc import SlocExplanationCreator, AutoProbSlocExplanationCreator, MaskedExplanationSum, TotalVariationLoss
-from visutils import showsal
 
 # --- Helper Functions ---
 def get_voc_val_images(voc_root):
@@ -29,13 +29,15 @@ def save_visual_result(img_pil, sal_tensor, filename):
     if isinstance(sal_tensor, np.ndarray): 
         sal_tensor = torch.from_numpy(sal_tensor.copy())
     sal_norm = (sal_tensor - sal_tensor.min()) / (sal_tensor.max() - sal_tensor.min() + 1e-8)
-    fig, ax = plt.subplots(1, 3, figsize=(15, 5)); fig.suptitle(f"Result for {os.path.basename(filename)}", fontsize=16)
+    fig, ax = plt.subplots(1, 3, figsize=(15, 5))
+    fig.suptitle(f"Result for {os.path.basename(filename)}", fontsize=16)
     ax[0].imshow(img_resized); ax[0].set_title("Original"); ax[0].axis('off')
     ax[1].imshow(sal_norm, cmap='jet'); ax[1].set_title("Saliency"); ax[1].axis('off')
-    ax[2].imshow(img_resized); ax[2].imshow(sal_norm, cmap='jet', alpha=0.5); ax[2].set_title("Overlay"); ax[2].axis('off')
+    ax[2].imshow(img_resized)
+    ax[2].imshow(sal_norm, cmap='jet', alpha=0.5); ax[2].set_title("Overlay"); ax[2].axis('off')
     plt.savefig(filename); plt.close(fig)
 
-# --- 1. Metric Evaluator ---
+# --- 1. Metric Evaluator (Base Paper Logic) ---
 class SLOCPaperEvaluator:
     def __init__(self, model, device):
         self.model, self.device = model, device
@@ -47,7 +49,8 @@ class SLOCPaperEvaluator:
         if isinstance(sal_map, np.ndarray): sal_map = np.ascontiguousarray(sal_map)
         sal_flatten = sal_map.flatten()
         idx_desc = np.argsort(sal_flatten)[::-1].copy() 
-        idx_asc = np.argsort(sal_flatten).copy()
+        idx_asc = np.argsort(sal_flatten).copy() # Least important first
+        
         black_base = torch.zeros_like(img_tensor).to(self.device)
         blur_base = self.blur(img_tensor).to(self.device)
         curves = {k: [] for k in ["ins", "del", "pos", "neg", "aic", "sic"]}
@@ -57,29 +60,39 @@ class SLOCPaperEvaluator:
             img_flat = img_tensor.view(1, 3, -1).contiguous()
             blur_flat = blur_base.view(1, 3, -1).contiguous()
             black_flat = black_base.view(1, 3, -1).contiguous()
+            
             for i in range(steps + 1):
                 n = min(i * step_size, len(idx_desc))
                 top_idx, bot_idx = idx_desc[:n], idx_asc[:n]
+                
+                # Faithfulness Protocol Calibration
                 img_ins = black_flat.clone(); img_ins[:, :, top_idx] = img_flat[:, :, top_idx]
                 img_del = img_flat.clone(); img_del[:, :, top_idx] = blur_flat[:, :, top_idx]
-                img_neg = img_flat.clone(); img_neg[:, :, bot_idx] = blur_flat[:, :, bot_idx]
-                for k, img in zip(["ins", "del", "neg", "pos"], [img_ins, img_del, img_neg, img_ins]):
+                
+                # POS: Inverse of Deletion (Keeping only most important)
+                img_pos = blur_flat.clone(); img_pos[:, :, top_idx] = img_flat[:, :, top_idx]
+                
+                # NEG: Keeping everything EXCEPT the most important (Inverse of Insertion)
+                img_neg = img_flat.clone(); img_neg[:, :, top_idx] = blur_flat[:, :, top_idx]
+
+                for k, img in zip(["ins", "del", "neg", "pos"], [img_ins, img_del, img_neg, img_pos]):
                     out = torch.softmax(self.model(img.view(1, 3, h, w)), dim=1)
                     prob = out[0, target_idx].item()
                     curves[k].append(prob)
                     if k == "ins":
                         curves["aic"].append(1.0 if torch.argmax(out) == target_idx else 0.0)
                         curves["sic"].append(prob)
+
         auc = {k: np.trapezoid(v, dx=1/steps) for k, v in curves.items()}
         return {"DEL": auc["del"], "INS": auc["ins"], "IDD": auc["ins"] - auc["del"], 
                 "POS": auc["pos"], "NEG": auc["neg"], "NPD": auc["neg"] - auc["pos"], 
                 "AIC": auc["aic"], "SIC": auc["sic"]}
 
-# --- 2. SLOC_m Creator (Added Epoch Logging) ---
+# --- 2. SLOC_m Creator (Epoch Logging) ---
 class SlocM_Creator(SlocExplanationCreator):
     def explain(self, me, inp, catidx, image_name="unknown"):
-        # NEW: CSV 1 - Epoch Wise Logging file
-        epoch_csv = f"sloc_epoch_logs_{me.arch}.csv"
+        # CSV 1: Epoch Logs for this backbone
+        epoch_csv = f"epoch_logs_{me.arch}_voc.csv"
         
         data = self.generate_data(me, inp, catidx)
         initial = (torch.randn(me.shape[0], me.shape[1]) * 0.2 + 3).to(me.device)
@@ -96,90 +109,64 @@ class SlocM_Creator(SlocExplanationCreator):
             loss = comp_loss + tv_loss + mag_loss
             loss.backward(); optimizer.step()
 
-            # Log every 100 epochs
             if epoch % 100 == 0 or epoch == 500:
                 epoch_logs.append({
                     'Image': image_name, 'Epoch': epoch, 'Loss': loss.item(),
                     'CompLoss': comp_loss.item(), 'TVLoss': tv_loss.item(), 'MagLoss': mag_loss.item()
                 })
         
-        # Save Epoch Logs
         pd.DataFrame(epoch_logs).to_csv(epoch_csv, mode='a', header=not os.path.exists(epoch_csv), index=False)
         return mexp.explanation.detach().cpu().numpy()
 
-# --- 3. Main Execution Block ---
 def main():
-    parser = argparse.ArgumentParser(description="Run the SLOC benchmark on the PASCAL VOC 2012 dataset.")
+    parser = argparse.ArgumentParser(description="PASCAL VOC Benchmark")
     parser.add_argument('--variant', type=str, default='SLOC_m', choices=['SLOC', 'SLOC_xp', 'SLOC_m'])
     parser.add_argument('--model', type=str, default='resnet50')
     parser.add_argument('--num_images', type=int, default=1000)
     args = parser.parse_args()
 
     me = ModelEnv(args.model)
-    print(f"GPU CHECK: Model is running on device: {me.device}")
-    if 'vit' in args.model.lower(): p = 0.3
-    else: p = 0.6
+    p = 0.3 if 'vit' in args.model.lower() else 0.6
     config = {'segsize': [16, 32, 48], 'nmasks': [800, 600, 400], 'pprob': [p]*3}
 
     if args.variant == 'SLOC_m': creator = SlocM_Creator(**config)
-    elif args.variant == 'SLOC_xp': creator = SlocExplanationCreator(**config)
-    else: creator = AutoProbSlocExplanationCreator(**config)
+    else: creator = SlocExplanationCreator(**config)
 
     VOC_ROOT = "/kaggle/input/pascalvoc/VOCdevkit/VOC2012"
     images = get_voc_val_images(VOC_ROOT)
-    selected_images = random.sample(images, min(args.num_images, len(images))) if args.num_images > 0 else images
+    selected_images = random.sample(images, min(args.num_images, len(images)))
     
     # CSV 2: Metrics Results
-    output_csv = f"sloc_{args.variant.lower()}_{args.model}_results.csv"
-    visuals_dir = "visuals"
+    output_csv = f"sloc_results_{args.model}_voc.csv"
+    visuals_dir = f"visuals_{args.model}"
     os.makedirs(visuals_dir, exist_ok=True)
 
-    print(f"Starting PASCAL VOC Benchmark for {len(selected_images)} images.")
     start_time = time.time()
-
     for i, path in enumerate(selected_images):
         name = os.path.basename(path)
-
-        eta = ''
-        if i > 0:
-            avg_time = (time.time() - start_time) / i
-            eta_seconds = avg_time * (NUM_IMAGES - i)
-            eta = f" | ETA: {eta_seconds/3600:.2f} hours"
-
-        print(f"\n[{i+1}/{NUM_IMAGES}] Processing {name}...{eta}")
-
         try:
-            img_pil, inp = me.get_image_ext(path); target = torch.argmax(me.model(inp)).item()
+            img_pil, inp = me.get_image_ext(path)
+            target = torch.argmax(me.model(inp)).item()
             
-            # Run Explanation (Passing name for epoch logging)
+            # 1. Run Explanation + Epoch Logging (CSV 1 generated inside)
             sal_numpy = creator.explain(me, inp, target, image_name=name)
             
-            # Metrics Calculation
-            m = SLOCPaperEvaluator(me.model, me.device).run(inp, sal_numpy, target, steps=50)
+            # 2. Metrics Calculation (CSV 2 generated here)
+            m = SLOCPaperEvaluator(me.model, me.device).run(inp, sal_numpy, target)
             m['Image'] = name
-            
-            # Incremental Save Results (CSV 2)
             pd.DataFrame([m]).to_csv(output_csv, mode='a', header=not os.path.exists(output_csv), index=False)
             
-            # Print results as requested
-            print(f"\n[{i+1}/{len(selected_images)}] {name}")
-            print(f"   IDD ↑: {m['IDD']:.4f} | NPD ↑: {m['NPD']:.4f} | AIC ↑: {m['AIC']:.4f} | SIC ↑: {m['SIC']:.4f}")
-            print(f"   DEL ↓: {m['DEL']:.4f} | INS ↑: {m['INS']:.4f} | POS ↓: {m['POS']:.4f} | NEG ↑: {m['NEG']:.4f}")
+            print(f"[{i+1}/{len(selected_images)}] {name} | IDD: {m['IDD']:.4f} | NPD: {m['NPD']:.4f}")
 
-            # NEW: Logic for visuals every 10 images
+            # Visuals folder saving every 10 images
             if (i + 1) % 10 == 0:
-                visual_filename = os.path.join(visuals_dir, f"res_{args.variant}_{i+1}_{name}.png")
-                save_visual_result(img_pil, sal_numpy, visual_filename)
-                print(f"   Saved visual result to {visual_filename}")
+                visual_path = os.path.join(visuals_dir, f"{name}.png")
+                save_visual_result(img_pil, sal_numpy, visual_path)
 
         except Exception as e:
-            print(f"   !!! FAILED for {name}: {e}")
+            print(f"FAILED for {name}: {e}")
 
-    total_time = time.time() - start_time
-    print("\n" + "="*80); print(f"BENCHMARK COMPLETED for {args.variant} in {total_time/3600:.2f} hours"); print("="*80)
-    if os.path.exists(output_csv):
-        df = pd.read_csv(output_csv); print(f"FINAL AVERAGE SCORES ({args.variant}, {args.model}, {NUM_IMAGES} images):")
-        print(df.mean(numeric_only=True).round(4)); print("="*80)
+    print(f"Benchmark Complete. Total Time: {(time.time()-start_time)/3600:.2f} hours")
 
 if __name__ == "__main__":
     main()
