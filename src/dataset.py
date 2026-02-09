@@ -12,11 +12,12 @@ import numpy as np
 
 class RSNABoneAgeSource:
     def __init__(self, base_path, split='training'):
-        # Matches your screenshot: /home/iiitdmk-drnagaraju/aps/RSNA_original14236_images
         self.base_path = base_path
         self.split = split
         
-        # Paths based on screenshot structure
+        # Consistent path logic for both training and validation splits
+        # Training: /.../boneage-training-dataset/ & boneage-training-dataset.csv
+        # Validation: /.../boneage-validation-dataset/ & boneage-validation-dataset.csv
         self.image_dir = os.path.join(base_path, f'boneage-{split}-dataset')
         self.csv_path = os.path.join(base_path, f'boneage-{split}-dataset.csv')
 
@@ -28,7 +29,7 @@ class RSNABoneAgeSource:
         images = {}
         for _, row in df.iterrows():
             img_id = str(row['id'])
-            # The dataset usually uses PNG files
+            # RSNA uses PNG format for bone age X-rays
             path = os.path.join(self.image_dir, f"{img_id}.png")
             
             if os.path.exists(path):
@@ -39,7 +40,7 @@ class RSNABoneAgeSource:
                     desc="male" if row['male'] else "female"
                 )
         return images
-
+        
 # class RSNASource:
 #     def __init__(self, base_path):
 #         self.base_path = base_path
