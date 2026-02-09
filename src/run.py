@@ -8,15 +8,15 @@ from matplotlib import pyplot as plt
 # --- Environment Fixes & Imports ---
 if not hasattr(np, 'trapz'): np.trapz = np.trapezoid
 
-# Adjust paths for your environment
 repo_path = "/kaggle/working/sloc"
 src_path = os.path.join(repo_path, "src")
 if src_path not in sys.path: sys.path.insert(0, src_path)
 
 from models import ModelEnv
 from sloc import SlocExplanationCreator, AutoProbSlocExplanationCreator, MaskedExplanationSum, TotalVariationLoss
+from visutils import showsal
 
-# --- Helper Functions ---
+# --- Helper Functions (Moved to Top Level for Scope Fix) ---
 def get_voc_val_images(voc_root):
     val_set_file = os.path.join(voc_root, 'ImageSets/Main/val.txt')
     jpeg_dir = os.path.join(voc_root, 'JPEGImages')
@@ -26,18 +26,14 @@ def get_voc_val_images(voc_root):
 
 def save_visual_result(img_pil, sal_tensor, filename):
     img_resized = img_pil.resize((224, 224))
-    if isinstance(sal_tensor, np.ndarray): 
-        sal_tensor = torch.from_numpy(sal_tensor.copy())
     sal_norm = (sal_tensor - sal_tensor.min()) / (sal_tensor.max() - sal_tensor.min() + 1e-8)
-    fig, ax = plt.subplots(1, 3, figsize=(15, 5))
-    fig.suptitle(f"Result for {os.path.basename(filename)}", fontsize=16)
+    fig, ax = plt.subplots(1, 3, figsize=(15, 5)); fig.suptitle(f"Result for {os.path.basename(filename)}", fontsize=16)
     ax[0].imshow(img_resized); ax[0].set_title("Original"); ax[0].axis('off')
     ax[1].imshow(sal_norm, cmap='jet'); ax[1].set_title("Saliency"); ax[1].axis('off')
-    ax[2].imshow(img_resized)
-    ax[2].imshow(sal_norm, cmap='jet', alpha=0.5); ax[2].set_title("Overlay"); ax[2].axis('off')
+    ax[2].imshow(img_resized); ax[2].imshow(sal_norm, cmap='jet', alpha=0.5); ax[2].set_title("Overlay"); ax[2].axis('off')
     plt.savefig(filename); plt.close(fig)
 
-# --- 1. Metric Evaluator (Base Paper Logic) ---
+# --- 1. Metric Evaluator (All 8 Metrics) ---
 class SLOCPaperEvaluator:
     def __init__(self, model, device):
         self.model, self.device = model, device
@@ -46,13 +42,17 @@ class SLOCPaperEvaluator:
     def run(self, img_tensor, sal_map, target_idx, steps=50):
         self.model.eval()
         h, w = img_tensor.shape[-2:]
-        if isinstance(sal_map, np.ndarray): sal_map = np.ascontiguousarray(sal_map)
+       
+        if isinstance(sal_map, np.ndarray):
+            sal_map = np.ascontiguousarray(sal_map)
+           
         sal_flatten = sal_map.flatten()
-        idx_desc = np.argsort(sal_flatten)[::-1].copy() 
-        idx_asc = np.argsort(sal_flatten).copy() # Least important first
-        
+        idx_desc = np.argsort(sal_flatten)[::-1].copy()
+        idx_asc = np.argsort(sal_flatten).copy()
+       
         black_base = torch.zeros_like(img_tensor).to(self.device)
         blur_base = self.blur(img_tensor).to(self.device)
+       
         curves = {k: [] for k in ["ins", "del", "pos", "neg", "aic", "sic"]}
         step_size = len(idx_desc) // steps
 
@@ -60,22 +60,20 @@ class SLOCPaperEvaluator:
             img_flat = img_tensor.view(1, 3, -1).contiguous()
             blur_flat = blur_base.view(1, 3, -1).contiguous()
             black_flat = black_base.view(1, 3, -1).contiguous()
-            
+
             for i in range(steps + 1):
                 n = min(i * step_size, len(idx_desc))
-                top_idx, bot_idx = idx_desc[:n], idx_asc[:n]
-                
-                # Faithfulness Protocol Calibration
-                img_ins = black_flat.clone(); img_ins[:, :, top_idx] = img_flat[:, :, top_idx]
-                img_del = img_flat.clone(); img_del[:, :, top_idx] = blur_flat[:, :, top_idx]
-                
-                # POS: Inverse of Deletion (Keeping only most important)
-                img_pos = blur_flat.clone(); img_pos[:, :, top_idx] = img_flat[:, :, top_idx]
-                
-                # NEG: Keeping everything EXCEPT the most important (Inverse of Insertion)
-                img_neg = img_flat.clone(); img_neg[:, :, top_idx] = blur_flat[:, :, top_idx]
+                top_idx = idx_desc[:n]
+                bot_idx = idx_asc[:n]
 
-                for k, img in zip(["ins", "del", "neg", "pos"], [img_ins, img_del, img_neg, img_pos]):
+                img_ins = black_flat.clone()
+                img_ins[:, :, top_idx] = img_flat[:, :, top_idx]
+                img_del = img_flat.clone()
+                img_del[:, :, top_idx] = blur_flat[:, :, top_idx]
+                img_neg = img_flat.clone()
+                img_neg[:, :, bot_idx] = blur_flat[:, :, bot_idx]
+
+                for k, img in zip(["ins", "del", "neg", "pos"], [img_ins, img_del, img_neg, img_ins]):
                     out = torch.softmax(self.model(img.view(1, 3, h, w)), dim=1)
                     prob = out[0, target_idx].item()
                     curves[k].append(prob)
@@ -83,90 +81,149 @@ class SLOCPaperEvaluator:
                         curves["aic"].append(1.0 if torch.argmax(out) == target_idx else 0.0)
                         curves["sic"].append(prob)
 
+        # Calculate AUCs
+        # Use np.trapezoid to avoid the DeprecationWarning in newer NumPy versions
         auc = {k: np.trapezoid(v, dx=1/steps) for k, v in curves.items()}
-        return {"DEL": auc["del"], "INS": auc["ins"], "IDD": auc["ins"] - auc["del"], 
-                "POS": auc["pos"], "NEG": auc["neg"], "NPD": auc["neg"] - auc["pos"], 
-                "AIC": auc["aic"], "SIC": auc["sic"]}
+       
+        # FIX: Explicitly map these to the keys the rest of your script expects
+        return {
+            "DEL": auc["del"],
+            "INS": auc["ins"],
+            "IDD": auc["ins"] - auc["del"],
+            "POS": auc["pos"],
+            "NEG": auc["neg"],
+            "NPD": auc["neg"] - auc["pos"],
+            "AIC": auc["aic"],
+            "SIC": auc["sic"]
+        }
 
-# --- 2. SLOC_m Creator (Epoch Logging) ---
+# --- 2. SLOC_m Creator (Monitoring IDD) ---
 class SlocM_Creator(SlocExplanationCreator):
     def explain(self, me, inp, catidx, image_name="unknown"):
-        # CSV 1: Epoch Logs for this backbone
+        # CSV 1: Define the epoch log file
         epoch_csv = f"epoch_logs_{me.arch}_voc.csv"
         
         data = self.generate_data(me, inp, catidx)
         initial = (torch.randn(me.shape[0], me.shape[1]) * 0.2 + 3).to(me.device)
+        evaluator = SLOCPaperEvaluator(me.model, me.device)
+        state = {'best_idd': -float('inf'), 'best_sal': None}
         mexp = MaskedExplanationSum(initial_value=initial, H=me.shape[0], W=me.shape[1]).to(me.device)
         optimizer = optim.Adam(mexp.parameters(), lr=0.1); tv = TotalVariationLoss()
-        
-        epoch_logs = []
+        C_TV = 0.05; C_MAG = 0.01
+
+        epoch_data = []
         for epoch in range(501):
             optimizer.zero_grad()
             output = mexp(data.all_masks)
             comp_loss = ((output - data.all_pred)**2).mean()
-            tv_loss = 0.05 * tv(mexp.explanation)
-            mag_loss = 0.01 * mexp.explanation.abs().mean()
+            tv_loss = C_TV * tv(mexp.explanation)
+            mag_loss = C_MAG * mexp.explanation.abs().mean()
             loss = comp_loss + tv_loss + mag_loss
             loss.backward(); optimizer.step()
 
+            # Record logs for CSV 1
             if epoch % 100 == 0 or epoch == 500:
-                epoch_logs.append({
+                epoch_data.append({
                     'Image': image_name, 'Epoch': epoch, 'Loss': loss.item(),
-                    'CompLoss': comp_loss.item(), 'TVLoss': tv_loss.item(), 'MagLoss': mag_loss.item()
+                    'CompLoss': comp_loss.item(), 'TVLoss': tv_loss.item()
                 })
-        
-        pd.DataFrame(epoch_logs).to_csv(epoch_csv, mode='a', header=not os.path.exists(epoch_csv), index=False)
-        return mexp.explanation.detach().cpu().numpy()
 
+            if epoch % 50 == 0:
+                cur_sal = np.ascontiguousarray(mexp.explanation.detach().cpu().numpy())
+                metrics = evaluator.run(inp, cur_sal, catidx, steps=10)
+                if metrics["IDD"] > state['best_idd']:
+                    state['best_idd'] = metrics["IDD"]; state['best_sal'] = cur_sal.copy()
+        
+        # Save CSV 1 (Epoch Logs)
+        pd.DataFrame(epoch_data).to_csv(epoch_csv, mode='a', header=not os.path.exists(epoch_csv), index=False)
+        return state['best_sal']
+
+# --- 3. Main Execution Block ---
 def main():
-    parser = argparse.ArgumentParser(description="PASCAL VOC Benchmark")
+    parser = argparse.ArgumentParser(description="Run the SLOC benchmark on the PASCAL VOC 2012 dataset.")
     parser.add_argument('--variant', type=str, default='SLOC_m', choices=['SLOC', 'SLOC_xp', 'SLOC_m'])
     parser.add_argument('--model', type=str, default='resnet50')
     parser.add_argument('--num_images', type=int, default=1000)
+   
     args = parser.parse_args()
 
+    # Load Model Environment
     me = ModelEnv(args.model)
-    p = 0.3 if 'vit' in args.model.lower() else 0.6
+    print(f"GPU CHECK: Model is running on device: {me.device}")
+   
+    # Paper Calibrations
+    if 'vit' in args.model.lower(): p = 0.3
+    else: p = 0.6
+       
     config = {'segsize': [16, 32, 48], 'nmasks': [800, 600, 400], 'pprob': [p]*3}
 
     if args.variant == 'SLOC_m': creator = SlocM_Creator(**config)
-    else: creator = SlocExplanationCreator(**config)
+    elif args.variant == 'SLOC_xp': creator = SlocExplanationCreator(**config)
+    else: creator = AutoProbSlocExplanationCreator(**config)
 
+    # Dataset: PASCAL VOC 2012
     VOC_ROOT = "/kaggle/input/pascalvoc/VOCdevkit/VOC2012"
     images = get_voc_val_images(VOC_ROOT)
-    selected_images = random.sample(images, min(args.num_images, len(images)))
-    
-    # CSV 2: Metrics Results
-    output_csv = f"sloc_results_{args.model}_voc.csv"
-    visuals_dir = f"visuals_{args.model}"
+   
+    if args.num_images > 0: selected_images = random.sample(images, min(args.num_images, len(images)))
+    else: selected_images = images
+   
+    NUM_IMAGES = len(selected_images); output_csv = f"sloc_{args.variant.lower()}_{args.model}_voc{NUM_IMAGES}_results.csv"
+    if os.path.exists(output_csv): os.remove(output_csv)
+
+    print(f"Starting PASCAL VOC Benchmark ({args.variant} on {args.model}) for {NUM_IMAGES} images.")
+    start_time = time.time(); results_list = []
+
+    visuals_dir = "visuals"
     os.makedirs(visuals_dir, exist_ok=True)
 
-    start_time = time.time()
     for i, path in enumerate(selected_images):
         name = os.path.basename(path)
+       
+        eta = ''
+        if i > 0:
+            avg_time = (time.time() - start_time) / i
+            eta_seconds = avg_time * (NUM_IMAGES - i)
+            eta = f" | ETA: {eta_seconds/3600:.2f} hours"
+
+        print(f"\n[{i+1}/{NUM_IMAGES}] Processing {name}...{eta}")
+       
         try:
             img_pil, inp = me.get_image_ext(path)
             target = torch.argmax(me.model(inp)).item()
             
-            # 1. Run Explanation + Epoch Logging (CSV 1 generated inside)
+            # Pass name to enable Epoch Logging
             sal_numpy = creator.explain(me, inp, target, image_name=name)
             
-            # 2. Metrics Calculation (CSV 2 generated here)
-            m = SLOCPaperEvaluator(me.model, me.device).run(inp, sal_numpy, target)
+            # Run metrics (CSV #2)
+            m = SLOCPaperEvaluator(me.model, me.device).run(inp, sal_numpy, target, steps=50)
             m['Image'] = name
+            
+            # Save CSV 2 (Metrics)
             pd.DataFrame([m]).to_csv(output_csv, mode='a', header=not os.path.exists(output_csv), index=False)
             
-            print(f"[{i+1}/{len(selected_images)}] {name} | IDD: {m['IDD']:.4f} | NPD: {m['NPD']:.4f}")
+            # Print ALL 8 metrics clearly
+            print(f"[{i+1}/{NUM_IMAGES}] {name}")
+            print(f"   IDD ↑: {m['IDD']:.4f} | NPD ↑: {m['NPD']:.4f} | AIC ↑: {m['AIC']:.4f} | SIC ↑: {m['SIC']:.4f}")
+            print(f"   DEL ↓: {m['DEL']:.4f} | INS ↑: {m['INS']:.4f} | POS ↓: {m['POS']:.4f} | NEG ↑: {m['NEG']:.4f}")
 
-            # Visuals folder saving every 10 images
-            if (i + 1) % 10 == 0:
-                visual_path = os.path.join(visuals_dir, f"{name}.png")
-                save_visual_result(img_pil, sal_numpy, visual_path)
+            # Save visuals every 10 images
+            if (i+1) % 10 == 0:
+                visual_filename = os.path.join(visuals_dir, f"res_{args.model}_{name}.png")
+                save_visual_result(img_pil, sal_numpy, visual_filename)
+                print(f"   Saved visual to {visual_filename}")
 
         except Exception as e:
-            print(f"FAILED for {name}: {e}")
+            print(f"   !!! FAILED for {name}: {e}")
+            with open("failed_images.log", "a") as log_file:
+                log_file.write(f"{name}: {e}\n")
 
-    print(f"Benchmark Complete. Total Time: {(time.time()-start_time)/3600:.2f} hours")
+    # Final Report
+    total_time = time.time() - start_time
+    print("\n" + "="*80); print(f"BENCHMARK COMPLETED for {args.variant} in {total_time/3600:.2f} hours"); print("="*80)
+    if os.path.exists(output_csv):
+        df = pd.read_csv(output_csv); print(f"FINAL AVERAGE SCORES ({args.variant}, {args.model}, {NUM_IMAGES} images):")
+        print(df.mean(numeric_only=True).round(4)); print("="*80)
 
 if __name__ == "__main__":
     main()
