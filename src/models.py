@@ -1,3 +1,4 @@
+import os
 import torch
 import torchvision
 from torchvision import transforms
@@ -9,43 +10,41 @@ import torchray.benchmark
 
 
 class ModelEnv:
-
-    def __init__(self, arch):
+    def __init__(self, arch, resolution=224, weights_path=None, regression=True):
         self.arch = arch
         self.device = self.get_device()
-        self.model = self.load_model(self.arch, self.device)
-        self.shape = (224,224)
+        self.shape = (resolution, resolution)
+        self.regression = regression
+        self.model = self.load_model(self.arch, self.device, weights_path)
 
-    def load_model(self, arch, dev):
-        if arch.startswith('voc_'):
-            model_arch = arch.replace('voc_','')
-            model = torchray.benchmark.models.get_model(arch=model_arch, dataset="voc", convert_to_fully_convolutional=False)
-
-        elif arch == 'vgg16NT':
-            model = torchvision.models.vgg16(pretrained=False)
-        elif arch == 'vgg16RT':            
-            model = torchvision.models.vgg16(pretrained=False)
-            output_weights_path = 'models/vgg16_retrained_n.pth'
-            model.load_state_dict(torch.load(output_weights_path))
-
-        elif 'resnet' in arch or 'vgg' in arch:
-        # Get a network pre-trained on ImageNet.
-            model = torchvision.models.__dict__[arch](pretrained=True)
-            #for param in model.parameters():
-            #    param.requires_grad_(False)        
-        elif 'vit' in arch or 'convnext' in arch or 'densenet' in arch or 'swin' in arch or 'efficientnet' in arch:
-            model = timm.create_model(arch, pretrained=True)
-        elif arch in torchvision.models.__dict__:
-            # This will catch mobilenet, resnet, vgg, etc.
-            model = torchvision.models.__dict__[arch](weights='DEFAULT')
+    def load_model(self, arch, dev, weights_path=None):
+        import os
+        # Load the base architecture
+        if self.regression:
+        # Replace the classification layer with a single output for age
+        if 'vit' in arch or 'swin' in arch or 'convnext' in arch:
+            model = timm.create_model(arch, pretrained=True, num_classes=1)
         else:
-            assert False, f"unexpected arch: {arch}"
+            model = torchvision.models.__dict__[arch](weights='DEFAULT')
+            if hasattr(model, 'fc'):
+                model.fc = nn.Linear(model.fc.in_features, 1)
+            elif hasattr(model, 'classifier'):
+                # Handle VGG/DenseNet style classifiers
+                if isinstance(model.classifier, nn.Sequential):
+                    in_features = model.classifier[-1].in_features
+                    model.classifier[-1] = nn.Linear(in_features, 1)
+                else:
+                    model.classifier = nn.Linear(model.classifier.in_features, 1)
+
+        if weights_path and os.path.exists(weights_path):
+            print(f"Loading weights from {weights_path}")
+            model.load_state_dict(torch.load(weights_path, map_location=dev))
             
-        model.eval()        
-        model = model.to(dev)
-        return model
+        return model.to(dev).eval()
 
     def narrow_model(self, catidx, with_softmax=False):
+        if self.regression:
+            return self.model
         if "voc" in self.arch:
             modules = (
                 [self.model] + 

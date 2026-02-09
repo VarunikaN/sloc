@@ -24,7 +24,29 @@ from models import ModelEnv
 from sloc import SlocExplanationCreator, AutoProbSlocExplanationCreator, MaskedExplanationSum, TotalVariationLoss
 from visutils import showsal
 
-# --- Helper Functions (Moved to Top Level for Scope Fix) ---
+def finetune_rsna(model, train_loader, epochs=5, lr=1e-4, device='cuda'):
+    model.train()
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    criterion = nn.MSELoss()
+    
+    print("Starting Fine-tuning on RSNA Bone Age...")
+    for epoch in range(epochs):
+        running_loss = 0.0
+        for images, targets in train_loader:
+            images, targets = images.to(device), targets.to(device).float().unsqueeze(1)
+            optimizer.zero_grad()
+            outputs = model(images)
+            loss = criterion(outputs, targets)
+            loss.backward()
+            optimizer.step()
+            running_loss += loss.item()
+        
+        print(f"Epoch {epoch+1} Loss: {running_loss/len(train_loader):.4f}")
+    
+    save_path = f"rsna_finetuned_{model.arch}.pth"
+    torch.save(model.state_dict(), save_path)
+    print(f"Weights saved to {save_path}")
+    
 def get_voc_val_images(voc_root):
     val_set_file = os.path.join(voc_root, 'ImageSets/Main/val.txt')
     jpeg_dir = os.path.join(voc_root, 'JPEGImages')
@@ -182,12 +204,15 @@ def main():
     parser.add_argument('--c_tv', type=float, default=0.1, help="Total Variation loss weight")
     parser.add_argument('--c_mag', type=float, default=0.01, help="Magnitude loss weight")
     parser.add_argument('--epochs', type=int, default=501, help="Number of optimization steps")
+    # Model-Centric Refinement Args
+    parser.add_argument('--resolution', type=int, default=224, help="Input resolution (e.g., 224 or 448)")
+    parser.add_argument('--weights_path', type=str, default=None, help="Path to RSNA fine-tuned .pth weights")
     
     args = parser.parse_args()
 
     # 1. Model Environment Setup
-    me = ModelEnv(args.model)
-    print(f"GPU CHECK: Model {args.model} is running on: {me.device}")
+    me = ModelEnv(args.model, resolution=args.resolution, weights_path=args.weights_path)
+    print(f"GPU CHECK: Model {args.model} at {args.resolution}x{args.resolution} is running on: {me.device}")
     
     # 2. Paper Calibration (Section 4.1)
     modern_archs = ['vit', 'swin', 'convnext', 'dual']
