@@ -24,29 +24,7 @@ from models import ModelEnv
 from sloc import SlocExplanationCreator, AutoProbSlocExplanationCreator, MaskedExplanationSum, TotalVariationLoss
 from visutils import showsal
 
-def finetune_rsna(model, train_loader, epochs=5, lr=1e-4, device='cuda'):
-    model.train()
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    criterion = nn.MSELoss()
-    
-    print("Starting Fine-tuning on RSNA Bone Age...")
-    for epoch in range(epochs):
-        running_loss = 0.0
-        for images, targets in train_loader:
-            images, targets = images.to(device), targets.to(device).float().unsqueeze(1)
-            optimizer.zero_grad()
-            outputs = model(images)
-            loss = criterion(outputs, targets)
-            loss.backward()
-            optimizer.step()
-            running_loss += loss.item()
-        
-        print(f"Epoch {epoch+1} Loss: {running_loss/len(train_loader):.4f}")
-    
-    save_path = f"rsna_finetuned_{model.arch}.pth"
-    torch.save(model.state_dict(), save_path)
-    print(f"Weights saved to {save_path}")
-    
+# --- Helper Functions (Moved to Top Level for Scope Fix) ---
 def get_voc_val_images(voc_root):
     val_set_file = os.path.join(voc_root, 'ImageSets/Main/val.txt')
     jpeg_dir = os.path.join(voc_root, 'JPEGImages')
@@ -89,28 +67,25 @@ class EpochLogger:
 class SLOCPaperEvaluator:
     def __init__(self, model, device):
         self.model, self.device = model, device
-        self.blur = T.GaussianBlur(kernel_size=11, sigma=5.0)
 
     def run(self, img_tensor, sal_map, target_idx, steps=50):
         self.model.eval()
         h, w = img_tensor.shape[-2:]
-        
         if isinstance(sal_map, np.ndarray):
             sal_map = np.ascontiguousarray(sal_map)
-            
+        
         sal_flatten = sal_map.flatten()
         idx_desc = np.argsort(sal_flatten)[::-1].copy() 
         idx_asc = np.argsort(sal_flatten).copy()
         
+        # PAPER ALIGNMENT: Explicitly use Black Image Baseline [cite: 95]
         black_base = torch.zeros_like(img_tensor).to(self.device)
-        blur_base = self.blur(img_tensor).to(self.device)
         
         curves = {k: [] for k in ["ins", "del", "pos", "neg", "aic", "sic"]}
         step_size = len(idx_desc) // steps
 
         with torch.no_grad():
             img_flat = img_tensor.view(1, 3, -1).contiguous()
-            blur_flat = blur_base.view(1, 3, -1).contiguous()
             black_flat = black_base.view(1, 3, -1).contiguous()
 
             for i in range(steps + 1):
@@ -120,10 +95,13 @@ class SLOCPaperEvaluator:
 
                 img_ins = black_flat.clone()
                 img_ins[:, :, top_idx] = img_flat[:, :, top_idx]
+                
+                # FIX: Use black_flat for DEL and NEG to align with paper 
                 img_del = img_flat.clone()
-                img_del[:, :, top_idx] = blur_flat[:, :, top_idx]
+                img_del[:, :, top_idx] = black_flat[:, :, top_idx]
+                
                 img_neg = img_flat.clone()
-                img_neg[:, :, bot_idx] = blur_flat[:, :, bot_idx]
+                img_neg[:, :, bot_idx] = black_flat[:, :, bot_idx]
 
                 for k, img in zip(["ins", "del", "neg", "pos"], [img_ins, img_del, img_neg, img_ins]):
                     out = torch.softmax(self.model(img.view(1, 3, h, w)), dim=1)
@@ -133,61 +111,49 @@ class SLOCPaperEvaluator:
                         curves["aic"].append(1.0 if torch.argmax(out) == target_idx else 0.0)
                         curves["sic"].append(prob)
 
-        # Calculate AUCs
-        # Use np.trapezoid to avoid the DeprecationWarning in newer NumPy versions
         auc = {k: np.trapezoid(v, dx=1/steps) for k, v in curves.items()}
-        
-        # FIX: Explicitly map these to the keys the rest of your script expects
         return {
-            "DEL": auc["del"], 
-            "INS": auc["ins"], 
-            "IDD": auc["ins"] - auc["del"], 
-            "POS": auc["pos"], 
-            "NEG": auc["neg"], 
-            "NPD": auc["neg"] - auc["pos"], 
-            "AIC": auc["aic"], 
-            "SIC": auc["sic"]
+            "DEL": auc["del"], "INS": auc["ins"], "IDD": auc["ins"] - auc["del"], 
+            "POS": auc["pos"], "NEG": auc["neg"], "NPD": auc["neg"] - auc["pos"], 
+            "AIC": auc["aic"], "SIC": auc["sic"]
         }
 
-# --- 2. SLOC_m Creator (Monitoring IDD) ---
+# --- 2. SLOC_m Creator (Restored LR Scheduler) ---
 class SlocM_Creator(SlocExplanationCreator):
-    def explain(self, me, inp, catidx, image_id="unknown", lr=0.1, c_tv=0.1, c_mag=0.01, epochs=501):
+    def explain(self, me, inp, catidx, image_id="unknown"):
         self.epoch_logger = EpochLogger(me.arch, "rsna_boneage")
-        
         data = self.generate_data(me, inp, catidx)
+        # Initialization logic from paper [cite: 188]
         initial = (torch.randn(me.shape[0], me.shape[1]) * 0.2 + 3).to(me.device)
         
-        final_explanation = self.optimize_with_logs(
-            me, inp, initial, data, image_id, catidx,
-            lr=lr, c_tv=c_tv, c_mag=c_mag, epochs=epochs
-        )
-        
+        final_explanation = self.optimize_with_logs(me, inp, initial, data, image_id, catidx)
         self.epoch_logger.save_to_disk()
         return final_explanation
 
-    def optimize_with_logs(self, me, inp, initial, data, image_id, catidx, lr, c_tv, c_mag, epochs):
+    def optimize_with_logs(self, me, inp, initial, data, image_id, catidx):
         mexp = MaskedExplanationSum(initial_value=initial, H=me.shape[0], W=me.shape[1]).to(me.device)
-        optimizer = optim.Adam(mexp.parameters(), lr=lr) # Use tuned LR
+        optimizer = optim.Adam(mexp.parameters(), lr=0.1)
+        # FIX: Restore Paper-aligned decay 
+        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.5)
         tv = TotalVariationLoss()
         
-        for epoch in range(epochs):
+        for epoch in range(501):
             optimizer.zero_grad()
             output = mexp(data.all_masks)
             
+            # Equation 2 & 4 implementation [cite: 151, 209]
             comp_loss = ((output - data.all_pred) ** 2).mean()
-            tv_loss = c_tv * tv(mexp.explanation) # Use tuned TV weight
-            mag_loss = c_mag * mexp.explanation.abs().mean() # Use tuned Magnitude weight
+            tv_loss = 0.05 * tv(mexp.explanation) # Paper Lambda 2
+            mag_loss = 0.01 * mexp.explanation.abs().mean() # Paper Lambda 1
             
             total_loss = comp_loss + tv_loss + mag_loss
             total_loss.backward()
             optimizer.step()
+            scheduler.step() # Apply decay
 
-            if epoch % 100 == 0 or epoch == epochs - 1:
-                self.epoch_logger.log(
-                    image_id, epoch, 
-                    total_loss.item(), comp_loss.item(), 
-                    tv_loss.item(), mag_loss.item()
-                )
+            if epoch % 100 == 0 or epoch == 500:
+                self.epoch_logger.log(image_id, epoch, total_loss.item(), 
+                                      comp_loss.item(), tv_loss.item(), mag_loss.item())
         return mexp.explanation.detach().cpu().numpy()
 
 # --- 3. Main Execution Block ---
@@ -199,20 +165,12 @@ def main():
     parser.add_argument('--split', type=str, default='training', choices=['training', 'validation'])
     parser.add_argument('--num_images', type=int, default=-1, help="If > 0, limit to this many images. Otherwise, run all.")
     parser.add_argument('--resume', action='store_true', help="Skip images already present in results CSV")
-    # NEW: Hyperparameter Tuning Args
-    parser.add_argument('--lr', type=float, default=0.1, help="Learning rate for mask optimization")
-    parser.add_argument('--c_tv', type=float, default=0.1, help="Total Variation loss weight")
-    parser.add_argument('--c_mag', type=float, default=0.01, help="Magnitude loss weight")
-    parser.add_argument('--epochs', type=int, default=501, help="Number of optimization steps")
-    # Model-Centric Refinement Args
-    parser.add_argument('--resolution', type=int, default=224, help="Input resolution (e.g., 224 or 448)")
-    parser.add_argument('--weights_path', type=str, default=None, help="Path to RSNA fine-tuned .pth weights")
     
     args = parser.parse_args()
 
     # 1. Model Environment Setup
-    me = ModelEnv(args.model, resolution=args.resolution, weights_path=args.weights_path)
-    print(f"GPU CHECK: Model {args.model} at {args.resolution}x{args.resolution} is running on: {me.device}")
+    me = ModelEnv(args.model)
+    print(f"GPU CHECK: Model {args.model} is running on: {me.device}")
     
     # 2. Paper Calibration (Section 4.1)
     modern_archs = ['vit', 'swin', 'convnext', 'dual']
@@ -290,14 +248,7 @@ def main():
             target = torch.argmax(logits).item()
             
             # SLOC Optimization + Epoch Logging inside creator.explain
-            sal_numpy = creator.explain(
-                me, inp, target, 
-                image_id=image_name,
-                lr=args.lr,
-                c_tv=args.c_tv,
-                c_mag=args.c_mag,
-                epochs=args.epochs
-            )
+            sal_numpy = creator.explain(me, inp, target, image_id=image_name)
             visual_path = os.path.join(visuals_dir, f"{image_name}.png")
             save_visual_result(img_pil, sal_numpy, visual_path)
             
