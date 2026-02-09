@@ -129,40 +129,38 @@ class SLOCPaperEvaluator:
 
 # --- 2. SLOC_m Creator (Monitoring IDD) ---
 class SlocM_Creator(SlocExplanationCreator):
-    def explain(self, me, inp, catidx, image_id="unknown"):
-        # Initialize logger for this specific run
+    def explain(self, me, inp, catidx, image_id="unknown", lr=0.1, c_tv=0.1, c_mag=0.01, epochs=501):
         self.epoch_logger = EpochLogger(me.arch, "rsna_boneage")
         
         data = self.generate_data(me, inp, catidx)
         initial = (torch.randn(me.shape[0], me.shape[1]) * 0.2 + 3).to(me.device)
         
-        # Pass the image_id down to the optimizer
         final_explanation = self.optimize_with_logs(
-            me, inp, initial, data, image_id, catidx
+            me, inp, initial, data, image_id, catidx,
+            lr=lr, c_tv=c_tv, c_mag=c_mag, epochs=epochs
         )
         
         self.epoch_logger.save_to_disk()
         return final_explanation
 
-    def optimize_with_logs(self, me, inp, initial, data, image_id, catidx):
+    def optimize_with_logs(self, me, inp, initial, data, image_id, catidx, lr, c_tv, c_mag, epochs):
         mexp = MaskedExplanationSum(initial_value=initial, H=me.shape[0], W=me.shape[1]).to(me.device)
-        optimizer = optim.Adam(mexp.parameters(), lr=0.1)
+        optimizer = optim.Adam(mexp.parameters(), lr=lr) # Use tuned LR
         tv = TotalVariationLoss()
         
-        for epoch in range(501):
+        for epoch in range(epochs):
             optimizer.zero_grad()
             output = mexp(data.all_masks)
             
             comp_loss = ((output - data.all_pred) ** 2).mean()
-            tv_loss = 0.1 * tv(mexp.explanation)
-            mag_loss = 0.01 * mexp.explanation.abs().mean()
+            tv_loss = c_tv * tv(mexp.explanation) # Use tuned TV weight
+            mag_loss = c_mag * mexp.explanation.abs().mean() # Use tuned Magnitude weight
             
             total_loss = comp_loss + tv_loss + mag_loss
             total_loss.backward()
             optimizer.step()
 
-            # Log every 100 epochs or as needed
-            if epoch % 100 == 0 or epoch == 500:
+            if epoch % 100 == 0 or epoch == epochs - 1:
                 self.epoch_logger.log(
                     image_id, epoch, 
                     total_loss.item(), comp_loss.item(), 
@@ -179,6 +177,11 @@ def main():
     parser.add_argument('--split', type=str, default='training', choices=['training', 'validation'])
     parser.add_argument('--num_images', type=int, default=-1, help="If > 0, limit to this many images. Otherwise, run all.")
     parser.add_argument('--resume', action='store_true', help="Skip images already present in results CSV")
+    # NEW: Hyperparameter Tuning Args
+    parser.add_argument('--lr', type=float, default=0.1, help="Learning rate for mask optimization")
+    parser.add_argument('--c_tv', type=float, default=0.1, help="Total Variation loss weight")
+    parser.add_argument('--c_mag', type=float, default=0.01, help="Magnitude loss weight")
+    parser.add_argument('--epochs', type=int, default=501, help="Number of optimization steps")
     
     args = parser.parse_args()
 
@@ -262,7 +265,14 @@ def main():
             target = torch.argmax(logits).item()
             
             # SLOC Optimization + Epoch Logging inside creator.explain
-            sal_numpy = creator.explain(me, inp, target, image_id=image_name)
+            sal_numpy = creator.explain(
+                me, inp, target, 
+                image_id=image_name,
+                lr=args.lr,
+                c_tv=args.c_tv,
+                c_mag=args.c_mag,
+                epochs=args.epochs
+            )
             visual_path = os.path.join(visuals_dir, f"{image_name}.png")
             save_visual_result(img_pil, sal_numpy, visual_path)
             
