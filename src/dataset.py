@@ -15,10 +15,11 @@ class RSNABoneAgeSource:
         self.base_path = base_path
         self.split = split
         
-        # Consistent path logic for both training and validation splits
-        # Training: /.../boneage-training-dataset/ & boneage-training-dataset.csv
-        # Validation: /.../boneage-validation-dataset/ & boneage-validation-dataset.csv
+        # Exact match for folder names in screenshot:
+        # e.g., boneage-validation-dataset
         self.image_dir = os.path.join(base_path, f'boneage-{split}-dataset')
+        # Exact match for CSV names in screenshot:
+        # e.g., boneage-validation-dataset.csv
         self.csv_path = os.path.join(base_path, f'boneage-{split}-dataset.csv')
 
     def get_all_images(self):
@@ -27,9 +28,14 @@ class RSNABoneAgeSource:
             
         df = pd.read_csv(self.csv_path)
         images = {}
+        
+        # Verification log
+        print(f"Loading split: {self.split}")
+        print(f"Checking directory: {self.image_dir}")
+
         for _, row in df.iterrows():
             img_id = str(row['id'])
-            # RSNA uses PNG format for bone age X-rays
+            # RSNA Bone Age typically uses .png files
             path = os.path.join(self.image_dir, f"{img_id}.png")
             
             if os.path.exists(path):
@@ -39,8 +45,10 @@ class RSNABoneAgeSource:
                     target=int(row['boneage']), 
                     desc="male" if row['male'] else "female"
                 )
-        return images
         
+        print(f"Successfully found {len(images)} images in {self.split} split.")
+        return images
+
 # class RSNASource:
 #     def __init__(self, base_path):
 #         self.base_path = base_path
