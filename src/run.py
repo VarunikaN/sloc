@@ -228,13 +228,20 @@ def main():
     if args.resume and os.path.exists(output_csv):
         try:
             existing_df = pd.read_csv(output_csv)
-            processed_images = set(existing_df['Image'].astype(str).tolist())
-            print(f"Resuming: Skipping {len(processed_images)} already processed images.")
-        except: 
-            print("Starting fresh: CSV empty or unreadable.")
+            # FORCE both integer and string versions into the set to be safe
+            raw_list = existing_df['Image'].tolist()
+            processed_images = set([str(x) for x in raw_list] + [int(x) for x in raw_list if str(x).isdigit()])
+            print(f"Resuming: Skipping {len(raw_list)} already processed images.")
+        except Exception as e: 
+            print(f"Starting fresh: CSV read error: {e}")
 
     # 6. Benchmark Loop
     print(f"Benchmark Configuration: {args.variant} | {args.model} | {args.split}")
+    
+    # NEW: Create a dedicated folder for this model's visuals
+    visuals_dir = f"visuals_{args.model}_{args.split}"
+    os.makedirs(visuals_dir, exist_ok=True)
+    
     start_time = time.time()
 
     for i, info in enumerate(selected_images):
@@ -256,6 +263,8 @@ def main():
             
             # SLOC Optimization + Epoch Logging inside creator.explain
             sal_numpy = creator.explain(me, inp, target, image_id=image_name)
+            visual_path = os.path.join(visuals_dir, f"{image_name}.png")
+            save_visual_result(img_pil, sal_numpy, visual_path)
             
             # Paper-Compliant Evaluation (Metrics strictly preserved)
             m = SLOCPaperEvaluator(me.model, me.device).run(inp, sal_numpy, target, steps=50)
