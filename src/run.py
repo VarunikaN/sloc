@@ -67,28 +67,25 @@ class EpochLogger:
 class SLOCPaperEvaluator:
     def __init__(self, model, device):
         self.model, self.device = model, device
-        self.blur = T.GaussianBlur(kernel_size=11, sigma=5.0)
 
     def run(self, img_tensor, sal_map, target_idx, steps=50):
         self.model.eval()
         h, w = img_tensor.shape[-2:]
-        
         if isinstance(sal_map, np.ndarray):
             sal_map = np.ascontiguousarray(sal_map)
-            
+        
         sal_flatten = sal_map.flatten()
         idx_desc = np.argsort(sal_flatten)[::-1].copy() 
         idx_asc = np.argsort(sal_flatten).copy()
         
+        # PAPER ALIGNMENT: Explicitly use Black Image Baseline [cite: 95]
         black_base = torch.zeros_like(img_tensor).to(self.device)
-        blur_base = self.blur(img_tensor).to(self.device)
         
         curves = {k: [] for k in ["ins", "del", "pos", "neg", "aic", "sic"]}
         step_size = len(idx_desc) // steps
 
         with torch.no_grad():
             img_flat = img_tensor.view(1, 3, -1).contiguous()
-            blur_flat = blur_base.view(1, 3, -1).contiguous()
             black_flat = black_base.view(1, 3, -1).contiguous()
 
             for i in range(steps + 1):
@@ -98,10 +95,13 @@ class SLOCPaperEvaluator:
 
                 img_ins = black_flat.clone()
                 img_ins[:, :, top_idx] = img_flat[:, :, top_idx]
+                
+                # FIX: Use black_flat for DEL and NEG to align with paper 
                 img_del = img_flat.clone()
-                img_del[:, :, top_idx] = blur_flat[:, :, top_idx]
+                img_del[:, :, top_idx] = black_flat[:, :, top_idx]
+                
                 img_neg = img_flat.clone()
-                img_neg[:, :, bot_idx] = blur_flat[:, :, bot_idx]
+                img_neg[:, :, bot_idx] = black_flat[:, :, bot_idx]
 
                 for k, img in zip(["ins", "del", "neg", "pos"], [img_ins, img_del, img_neg, img_ins]):
                     out = torch.softmax(self.model(img.view(1, 3, h, w)), dim=1)
@@ -111,63 +111,49 @@ class SLOCPaperEvaluator:
                         curves["aic"].append(1.0 if torch.argmax(out) == target_idx else 0.0)
                         curves["sic"].append(prob)
 
-        # Calculate AUCs
-        # Use np.trapezoid to avoid the DeprecationWarning in newer NumPy versions
         auc = {k: np.trapezoid(v, dx=1/steps) for k, v in curves.items()}
-        
-        # FIX: Explicitly map these to the keys the rest of your script expects
         return {
-            "DEL": auc["del"], 
-            "INS": auc["ins"], 
-            "IDD": auc["ins"] - auc["del"], 
-            "POS": auc["pos"], 
-            "NEG": auc["neg"], 
-            "NPD": auc["neg"] - auc["pos"], 
-            "AIC": auc["aic"], 
-            "SIC": auc["sic"]
+            "DEL": auc["del"], "INS": auc["ins"], "IDD": auc["ins"] - auc["del"], 
+            "POS": auc["pos"], "NEG": auc["neg"], "NPD": auc["neg"] - auc["pos"], 
+            "AIC": auc["aic"], "SIC": auc["sic"]
         }
 
-# --- 2. SLOC_m Creator (Monitoring IDD) ---
+# --- 2. SLOC_m Creator (Restored LR Scheduler) ---
 class SlocM_Creator(SlocExplanationCreator):
     def explain(self, me, inp, catidx, image_id="unknown"):
-        # Initialize logger for this specific run
         self.epoch_logger = EpochLogger(me.arch, "rsna_boneage")
-        
         data = self.generate_data(me, inp, catidx)
+        # Initialization logic from paper [cite: 188]
         initial = (torch.randn(me.shape[0], me.shape[1]) * 0.2 + 3).to(me.device)
         
-        # Pass the image_id down to the optimizer
-        final_explanation = self.optimize_with_logs(
-            me, inp, initial, data, image_id, catidx
-        )
-        
+        final_explanation = self.optimize_with_logs(me, inp, initial, data, image_id, catidx)
         self.epoch_logger.save_to_disk()
         return final_explanation
 
     def optimize_with_logs(self, me, inp, initial, data, image_id, catidx):
         mexp = MaskedExplanationSum(initial_value=initial, H=me.shape[0], W=me.shape[1]).to(me.device)
         optimizer = optim.Adam(mexp.parameters(), lr=0.1)
+        # FIX: Restore Paper-aligned decay 
+        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.5)
         tv = TotalVariationLoss()
         
         for epoch in range(501):
             optimizer.zero_grad()
             output = mexp(data.all_masks)
             
+            # Equation 2 & 4 implementation [cite: 151, 209]
             comp_loss = ((output - data.all_pred) ** 2).mean()
-            tv_loss = 0.1 * tv(mexp.explanation)
-            mag_loss = 0.01 * mexp.explanation.abs().mean()
+            tv_loss = 0.05 * tv(mexp.explanation) # Paper Lambda 2
+            mag_loss = 0.01 * mexp.explanation.abs().mean() # Paper Lambda 1
             
             total_loss = comp_loss + tv_loss + mag_loss
             total_loss.backward()
             optimizer.step()
+            scheduler.step() # Apply decay
 
-            # Log every 100 epochs or as needed
             if epoch % 100 == 0 or epoch == 500:
-                self.epoch_logger.log(
-                    image_id, epoch, 
-                    total_loss.item(), comp_loss.item(), 
-                    tv_loss.item(), mag_loss.item()
-                )
+                self.epoch_logger.log(image_id, epoch, total_loss.item(), 
+                                      comp_loss.item(), tv_loss.item(), mag_loss.item())
         return mexp.explanation.detach().cpu().numpy()
 
 # --- 3. Main Execution Block ---
