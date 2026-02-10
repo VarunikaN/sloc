@@ -21,24 +21,32 @@ class RSNAHandDataset(Dataset):
         return self.transform(img), info.target
 
 def main():
-    parser = argparse.ArgumentParser(description="Finetune any model on RSNA Bone Age.")
-    parser.add_argument('--model', type=str, default='resnet50', help="Model name from timm")
+    parser = argparse.ArgumentParser(description="Finetune multi-backbone models on RSNA Bone Age.")
+    parser.add_argument('--model', type=str, default='resnet50', help="Backbone name (e.g., deit_tiny_distilled_patch16_224, swin_tiny_patch4_window7_224)")
     parser.add_argument('--epochs', type=int, default=10)
     parser.add_argument('--batch_size', type=int, default=16)
     parser.add_argument('--lr', type=float, default=1e-4)
     args = parser.parse_args()
 
     # --- UNIVERSAL BACKBONE INITIALIZATION ---
-    print(f"Initializing {args.model}...")
-    # Use timm to automatically handle head replacement and pooling for ALL backbones
-    model = timm.create_model(
-        args.model, 
-        pretrained=True, 
-        num_classes=241, 
-        global_pool='avg' # Ensures 3D feature maps are pooled into 1D vectors
-    )
+    print(f"Initializing {args.model} for RSNA dataset...")
     
-    # Get model-specific transforms (crucial for ViT/Swin/ConvNeXt)
+    # FIX: DeiT Distilled models REQUIRE 'token' pooling, others prefer 'avg'
+    global_pool_mode = 'token' if 'distilled' in args.model else 'avg'
+    
+    try:
+        model = timm.create_model(
+            args.model, 
+            pretrained=True, 
+            num_classes=241, 
+            global_pool=global_pool_mode 
+        )
+    except TypeError:
+        # Fallback for older timm versions or specific architectures that don't support global_pool in factory
+        model = timm.create_model(args.model, pretrained=True, num_classes=241)
+    
+    # Get model-specific transforms (essential for ViT/Swin patch-based input)
+    # 
     data_config = timm.data.resolve_data_config({}, model=model)
     transform = timm.data.create_transform(**data_config, is_training=True)
 
@@ -46,7 +54,8 @@ def main():
     model = model.to(device)
     
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-5) # AdamW is better for ViTs
+    # AdamW is the standard for Transformers and modern CNNs like ConvNeXt
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-5) 
     
     # Dataset Setup
     root = "/kaggle/working/rsnadata/RSNA_original14236_images"
@@ -54,6 +63,7 @@ def main():
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=2)
 
     # Training Loop
+    print(f"Starting finetuning for {args.model} on {device}...")
     for epoch in range(args.epochs):
         model.train()
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs}")
@@ -63,19 +73,22 @@ def main():
             
             outputs = model(imgs)
             
-            # Final Safeguard: Flatten any residual spatial dims to prevent the 3D target error
+            # --- FINAL DIMENSION SAFEGUARD ---
+            # Handles cases where Swin or ConvNeXt might return [B, C, H, W] instead of [B, C]
+            # 
             if outputs.dim() > 2:
                 outputs = torch.mean(outputs, dim=tuple(range(2, outputs.dim())))
             
             loss = criterion(outputs, labels)
             loss.backward()
             optimizer.step()
-            pbar.set_postfix(loss=loss.item())
+            pbar.set_postfix(loss=f"{loss.item():.4f}")
 
+    # Create directory and save model weights
     os.makedirs("models", exist_ok=True)
     save_path = f"models/{args.model}_rsna_best.pth"
     torch.save(model.state_dict(), save_path)
-    print(f"Model saved to {save_path}")
+    print(f"Successfully saved {args.model} to {save_path}")
 
 if __name__ == "__main__":
     main()
