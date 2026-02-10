@@ -226,7 +226,7 @@ def main():
                     def forward(self, x):
                         return self.fc(x)
                 
-                me.model.head = HeadWithFC(in_features, 241)
+                me.model.head = HeadWithFC(in_features, 241).to(me.device)  # ← ADD .to(me.device) HERE
                 print(f"DEBUG: Created HeadWithFC structure with {in_features} -> 241")
         else:
             # Standard structure (ResNet or simple ViT)
@@ -235,30 +235,15 @@ def main():
                 me.model.head = torch.nn.Linear(me.model.head.in_features, 241)
             elif hasattr(me.model, 'fc'):
                 me.model.fc = torch.nn.Linear(me.model.fc.in_features, 241)
-        
+
         # Now load the checkpoint
         missing_keys, unexpected_keys = me.model.load_state_dict(checkpoint, strict=False)
-        
+
         if missing_keys:
             print(f"Warning: Missing keys: {missing_keys}")
         if unexpected_keys:
             print(f"Warning: Unexpected keys: {unexpected_keys}")
-            
-        # Verify the model output shape
-        test_input = torch.randn(1, 3, 224, 224).to(me.device)
-        with torch.no_grad():
-            test_output = me.model(test_input)
-        print(f"DEBUG: Model output shape: {test_output.shape} (expected: [1, 241])")
-        
-    else:
-        print(f"CRITICAL: {args.model} checkpoint NOT found. Explaining pre-trained features instead.")
-        # Modify head to 241 classes for pretrained models
-        if hasattr(me.model, 'head'):
-            me.model.head = torch.nn.Linear(me.model.head.in_features, 241)
-        elif hasattr(me.model, 'fc'):
-            me.model.fc = torch.nn.Linear(me.model.fc.in_features, 241)
-    
-    # Move model to device and set to eval mode
+
     me.model.to(me.device)
     me.model.eval()
     
