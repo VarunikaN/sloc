@@ -130,23 +130,25 @@ class SlocM_Creator(SlocExplanationCreator):
     def optimize_with_logs(self, me, inp, initial, data, image_id, catidx):
         mexp = MaskedExplanationSum(initial_value=initial, H=me.shape[0], W=me.shape[1]).to(me.device)
         optimizer = optim.Adam(mexp.parameters(), lr=0.1)
-        # FIX: Restore Paper-aligned decay 
         scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.5)
         tv = TotalVariationLoss()
         
+        # CRITICAL FIX: Ensure targets is a flat 1D tensor [1800]
+        targets = data.all_pred.flatten() 
+
         for epoch in range(501):
             optimizer.zero_grad()
-            output = mexp(data.all_masks)
+            output = mexp(data.all_masks) # This is [1800]
             
-            # Equation 2 & 4 implementation [cite: 151, 209]
-            comp_loss = ((output - data.all_pred) ** 2).mean()
-            tv_loss = 0.05 * tv(mexp.explanation) # Paper Lambda 2
-            mag_loss = 0.01 * mexp.explanation.abs().mean() # Paper Lambda 1
+            # Now [1800] matches [1800]
+            comp_loss = ((output - targets) ** 2).mean() 
+            tv_loss = 0.05 * tv(mexp.explanation)
+            mag_loss = 0.01 * mexp.explanation.abs().mean()
             
             total_loss = comp_loss + tv_loss + mag_loss
             total_loss.backward()
             optimizer.step()
-            scheduler.step() # Apply decay
+            scheduler.step()
 
             if epoch % 100 == 0 or epoch == 500:
                 self.epoch_logger.log(image_id, epoch, total_loss.item(), 

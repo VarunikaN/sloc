@@ -106,8 +106,8 @@ class MaskedRespGen:
         h = self.ishape[0]
         w = self.ishape[1]
         baseline = self.baseline.to(inp.device)
-    
-        for idx in tqdm(range(itr)):                
+        
+        for idx in tqdm(range(itr)):            
             masks = self.mgen.gen_masks(batch_size)
             is_valid = (masks.flatten(start_dim=1).sum(dim=1) > 0)
             
@@ -118,17 +118,16 @@ class MaskedRespGen:
 
             pert_inp = inp * dmasks.unsqueeze(1) + baseline * (1.0-dmasks.unsqueeze(1))
             
-            # model(pert_inp) returns [Batch, 241]
-            # BUT me.narrow_model() was already used in generate_data()!
-            # me.narrow_model() adds SelectKthLogit, so out should already be [Batch, 1]
+            # model(pert_inp) is the sequential wrapper containing SelectKthLogit
+            # It SHOULD return shape [Batch, 1], but check for extra dimensions
             out = model(pert_inp) 
             
-            # CRITICAL FIX: Ensure we have a 1D tensor of shape [Batch]
-            # If out is [Batch, 1, 1, 1], we must squeeze it to [Batch]
+            # CRITICAL FIX: Squeeze to ensure a 1D tensor of shape [Batch]
+            # This prevents the 1800 x 241 broadcast error
             out_flat = out.view(-1) 
 
             self.all_masks.append(masks.cpu())
-            # Store as [Batch, 1, 1] to match expected formatting in later steps
+            # Store as [Batch, 1, 1] to satisfy MaskedExplanationSum's dot product logic
             self.all_pred.append(out_flat.unsqueeze(-1).unsqueeze(-1).cpu())
             self.num_masks += int(is_valid.sum())
 
