@@ -171,7 +171,6 @@ class SlocM_Creator(SlocExplanationCreator):
         return mexp.explanation.detach().cpu().numpy()
 
 # --- 3. Main Execution Block ---
-# --- 3. Main Execution Block ---
 def main():
     parser = argparse.ArgumentParser(description="Run SLOC Benchmark on Full RSNA Bone Age Split.")
     parser.add_argument('--variant', type=str, default='SLOC_m', choices=['SLOC', 'SLOC_xp', 'SLOC_m'])
@@ -207,14 +206,16 @@ def main():
     if checkpoint_loaded:
         print(f"Loading custom RSNA weights from {checkpoint_path}")
         
-        # Detect checkpoint structure and adapt model accordingly
-        has_head_fc = any('head.fc' in k for k in checkpoint.keys())
-        has_simple_head = any('head.weight' in k for k in checkpoint.keys())
-        has_fc = any(k.startswith('fc.') for k in checkpoint.keys())
+        # Debug: Print checkpoint keys to understand structure
+        head_keys = [k for k in checkpoint.keys() if 'head' in k or 'fc' in k]
+        print(f"DEBUG: Head/FC keys in checkpoint: {head_keys}")
+        
+        # Detect checkpoint structure
+        has_head_fc = any('head.fc.' in k for k in checkpoint.keys())
         
         if has_head_fc:
             # Checkpoint has nested head.fc structure (Swin models)
-            # Need to recreate this structure in the model
+            print("DEBUG: Detected head.fc structure (Swin model)")
             if hasattr(me.model, 'head'):
                 in_features = me.model.head.in_features
                 # Create a module that matches the checkpoint structure
@@ -226,22 +227,29 @@ def main():
                         return self.fc(x)
                 
                 me.model.head = HeadWithFC(in_features, 241)
-        elif has_simple_head:
-            # Checkpoint has simple head structure (ViT models)
+                print(f"DEBUG: Created HeadWithFC structure with {in_features} -> 241")
+        else:
+            # Standard structure (ResNet or simple ViT)
+            print("DEBUG: Detected standard head/fc structure")
             if hasattr(me.model, 'head'):
                 me.model.head = torch.nn.Linear(me.model.head.in_features, 241)
-        elif has_fc:
-            # Checkpoint has fc structure (ResNet models)
-            if hasattr(me.model, 'fc'):
+            elif hasattr(me.model, 'fc'):
                 me.model.fc = torch.nn.Linear(me.model.fc.in_features, 241)
         
-        # Now load the checkpoint - should match perfectly
+        # Now load the checkpoint
         missing_keys, unexpected_keys = me.model.load_state_dict(checkpoint, strict=False)
         
         if missing_keys:
             print(f"Warning: Missing keys: {missing_keys}")
         if unexpected_keys:
             print(f"Warning: Unexpected keys: {unexpected_keys}")
+            
+        # Verify the model output shape
+        test_input = torch.randn(1, 3, 224, 224).to(me.device)
+        with torch.no_grad():
+            test_output = me.model(test_input)
+        print(f"DEBUG: Model output shape: {test_output.shape} (expected: [1, 241])")
+        
     else:
         print(f"CRITICAL: {args.model} checkpoint NOT found. Explaining pre-trained features instead.")
         # Modify head to 241 classes for pretrained models
