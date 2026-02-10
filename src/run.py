@@ -171,6 +171,7 @@ class SlocM_Creator(SlocExplanationCreator):
         return mexp.explanation.detach().cpu().numpy()
 
 # --- 3. Main Execution Block ---
+# --- 3. Main Execution Block ---
 def main():
     parser = argparse.ArgumentParser(description="Run SLOC Benchmark on Full RSNA Bone Age Split.")
     parser.add_argument('--variant', type=str, default='SLOC_m', choices=['SLOC', 'SLOC_xp', 'SLOC_m'])
@@ -185,13 +186,7 @@ def main():
     # 1. Model Environment Setup
     me = ModelEnv(args.model)
     
-    # Modify head to 241 classes first
-    if hasattr(me.model, 'head'):
-        me.model.head = torch.nn.Linear(me.model.head.in_features, 241)
-    elif hasattr(me.model, 'fc'):
-        me.model.fc = torch.nn.Linear(me.model.fc.in_features, 241)
-
-    # FIXED: Check multiple possible checkpoint locations
+    # FIXED: Check multiple possible checkpoint locations FIRST
     checkpoint_paths = [
         f"/kaggle/working/sloc/models/{args.model}_rsna_best.pth",
         f"/kaggle/working/models/{args.model}_rsna_best.pth",
@@ -199,24 +194,61 @@ def main():
     ]
     
     checkpoint_loaded = False
-    for checkpoint_path in checkpoint_paths:
-        if os.path.exists(checkpoint_path):
-            print(f"Loading custom RSNA weights from {checkpoint_path}")
-            checkpoint = torch.load(checkpoint_path, map_location=me.device)
-            
-            # Use strict=False to allow partial loading and handle key mismatches
-            missing_keys, unexpected_keys = me.model.load_state_dict(checkpoint, strict=False)
-            
-            if missing_keys:
-                print(f"Warning: Missing keys: {missing_keys}")
-            if unexpected_keys:
-                print(f"Warning: Unexpected keys: {unexpected_keys}")
-            
+    checkpoint = None
+    checkpoint_path = None
+    
+    for path in checkpoint_paths:
+        if os.path.exists(path):
+            checkpoint_path = path
+            checkpoint = torch.load(path, map_location=me.device)
             checkpoint_loaded = True
             break
     
-    if not checkpoint_loaded:
+    if checkpoint_loaded:
+        print(f"Loading custom RSNA weights from {checkpoint_path}")
+        
+        # Detect checkpoint structure and adapt model accordingly
+        has_head_fc = any('head.fc' in k for k in checkpoint.keys())
+        has_simple_head = any('head.weight' in k for k in checkpoint.keys())
+        has_fc = any(k.startswith('fc.') for k in checkpoint.keys())
+        
+        if has_head_fc:
+            # Checkpoint has nested head.fc structure (Swin models)
+            # Need to recreate this structure in the model
+            if hasattr(me.model, 'head'):
+                in_features = me.model.head.in_features
+                # Create a module that matches the checkpoint structure
+                class HeadWithFC(torch.nn.Module):
+                    def __init__(self, in_features, out_features):
+                        super().__init__()
+                        self.fc = torch.nn.Linear(in_features, out_features)
+                    def forward(self, x):
+                        return self.fc(x)
+                
+                me.model.head = HeadWithFC(in_features, 241)
+        elif has_simple_head:
+            # Checkpoint has simple head structure (ViT models)
+            if hasattr(me.model, 'head'):
+                me.model.head = torch.nn.Linear(me.model.head.in_features, 241)
+        elif has_fc:
+            # Checkpoint has fc structure (ResNet models)
+            if hasattr(me.model, 'fc'):
+                me.model.fc = torch.nn.Linear(me.model.fc.in_features, 241)
+        
+        # Now load the checkpoint - should match perfectly
+        missing_keys, unexpected_keys = me.model.load_state_dict(checkpoint, strict=False)
+        
+        if missing_keys:
+            print(f"Warning: Missing keys: {missing_keys}")
+        if unexpected_keys:
+            print(f"Warning: Unexpected keys: {unexpected_keys}")
+    else:
         print(f"CRITICAL: {args.model} checkpoint NOT found. Explaining pre-trained features instead.")
+        # Modify head to 241 classes for pretrained models
+        if hasattr(me.model, 'head'):
+            me.model.head = torch.nn.Linear(me.model.head.in_features, 241)
+        elif hasattr(me.model, 'fc'):
+            me.model.fc = torch.nn.Linear(me.model.fc.in_features, 241)
     
     # Move model to device and set to eval mode
     me.model.to(me.device)
