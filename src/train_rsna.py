@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 # Add your local src path
-sys.path.insert(0, "/home/iiitdmk-drnagaraju/xai/sloc/src")
+sys.path.insert(0, "/kaggle/working/sloc/src")
 from models import ModelEnv
 from dataset import RSNABoneAgeSource, load_boneage_as_pil
 
@@ -44,7 +44,7 @@ def main():
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     
     # Dataset Setup
-    root = "/home/iiitdmk-drnagaraju/aps/RSNA_original14236_images"
+    root = "/kaggle/working/rsnadata/RSNA_original14236_images"
     train_ds = RSNAHandDataset(root, 'training', me.get_transform())
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=4)
 

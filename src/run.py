@@ -16,7 +16,7 @@ from visutils import showsal
 # --- Environment Fixes & Imports ---
 if not hasattr(np, 'trapz'): np.trapz = np.trapezoid
 
-repo_path = "/home/iiitdmk-drnagaraju/xai/sloc"
+repo_path = "/kaggle/working/sloc"
 src_path = os.path.join(repo_path, "src")
 if src_path not in sys.path: sys.path.insert(0, src_path)
 
@@ -174,7 +174,7 @@ def main():
     elif hasattr(me.model, 'fc'):
         me.model.fc = torch.nn.Linear(me.model.fc.in_features, 241)
 
-    checkpoint_path = "/home/iiitdmk-drnagaraju/xai/sloc/models/vit_small_patch16_224_rsna_best.pth"
+    checkpoint_path = "/kaggle/working/sloc/models/vit_small_patch16_224_rsna_best.pth"
     if os.path.exists(checkpoint_path):
         print(f"Loading custom RSNA weights from {checkpoint_path}")
         me.model.load_state_dict(torch.load(checkpoint_path, map_location=me.device))
@@ -199,7 +199,7 @@ def main():
 
     # 4. Dataset Loading (Using full split based on local path)
     if args.dataset == 'rsna_boneage':
-        BONEAGE_ROOT = "/home/iiitdmk-drnagaraju/aps/RSNA_original14236_images"
+        BONEAGE_ROOT = "/kaggle/input/rsnadata/RSNA_original14236_images"
         from dataset import RSNABoneAgeSource, load_boneage_as_pil
         
         source = RSNABoneAgeSource(BONEAGE_ROOT, split=args.split)
