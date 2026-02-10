@@ -128,31 +128,42 @@ class SlocM_Creator(SlocExplanationCreator):
         return final_explanation
 
     def optimize_with_logs(self, me, inp, initial, data, image_id, catidx):
-        # 1. Force the initial attribution map onto the specific GPU (cuda:0)
+        # Ensure initial attribution map is on the GPU
         initial = initial.to(me.device) 
         mexp = MaskedExplanationSum(initial_value=initial, H=me.shape[0], W=me.shape[1]).to(me.device)
         
         optimizer = optim.Adam(mexp.parameters(), lr=0.1)
+        # PAPER ALIGNMENT: 50-step decay for soft local completeness updates [cite: 221]
         scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.5)
         tv = TotalVariationLoss()
         
+        # --- CRITICAL FIX: Move masks to GPU FIRST ---
         masks = data.all_masks.to(me.device)
-        if data.all_pred.numel() == masks.shape[0] * 241:
-        # Classification: reshape [433800] -> [1800, 241], extract target class
-            targets = data.all_pred.view(masks.shape[0], 241)[:, catidx].to(me.device)
+        
+        # Handle the flattened predictions properly
+        all_pred = data.all_pred
+        
+        # Check if we have classification output (1800 * 241 = 433800)
+        if all_pred.numel() == masks.shape[0] * 241:
+            # Reshape from [433800] to [1800, 241] and extract target class column
+            targets = all_pred.view(masks.shape[0], 241)[:, catidx].to(me.device)
         else:
-            # Regression or already correct shape
-            targets = data.all_pred.flatten().to(me.device)
+            # Single output per mask (regression case)
+            targets = all_pred.flatten().to(me.device)
+        # --- CRITICAL FIX END ---
 
         for epoch in range(501):
             optimizer.zero_grad()
+            # Forward pass: Attribution sum per sub-map
+            output = mexp(masks) # Shape [1800]
             
-            # Forward pass: All tensors are now guaranteed to be on me.device
-            output = mexp(masks) 
-            
+            # Equation 2: Completeness Gap for target class y [cite: 151]
+            # Both tensors are now size [1800]
             comp_loss = ((output - targets) ** 2).mean() 
-            tv_loss = 0.05 * tv(mexp.explanation)
-            mag_loss = 0.01 * mexp.explanation.abs().mean()
+            
+            # Equation 4: Regularization [cite: 209]
+            tv_loss = 0.05 * tv(mexp.explanation) # Lambda 2
+            mag_loss = 0.01 * mexp.explanation.abs().mean() # Lambda 1
             
             total_loss = comp_loss + tv_loss + mag_loss
             total_loss.backward()
@@ -161,8 +172,8 @@ class SlocM_Creator(SlocExplanationCreator):
 
             if epoch % 100 == 0 or epoch == 500:
                 self.epoch_logger.log(image_id, epoch, total_loss.item(), 
-                                      comp_loss.item(), tv_loss.item(), mag_loss.item())
-                                      
+                                    comp_loss.item(), tv_loss.item(), mag_loss.item())
+        
         return mexp.explanation.detach().cpu().numpy()
 
 # --- 3. Main Execution Block ---
