@@ -154,8 +154,6 @@ class SlocM_Creator(SlocExplanationCreator):
             optimizer.zero_grad()
             # Forward pass: Attribution sum per sub-map
             output = mexp(masks) # Shape [1800]
-            if epoch == 0:
-                import pdb; pdb.set_trace()
             
             # Equation 2: Completeness Gap for target class y [cite: 151]
             # Both tensors are now size [1800]
