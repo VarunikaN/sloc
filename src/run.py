@@ -137,9 +137,8 @@ class SlocM_Creator(SlocExplanationCreator):
         scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.5)
         tv = TotalVariationLoss()
         
-        # --- CRITICAL FIX START ---
-        # data.all_pred has shape [1800, 241] or [1800, 1, 1]
-        # We MUST extract only the value for catidx (the target age)
+        print(f"DEBUG: data.all_pred.shape = {data.all_pred.shape}")
+        print(f"DEBUG: catidx = {catidx}, type = {type(catidx)}")
         if len(data.all_pred.shape) > 1 and data.all_pred.shape[-1] == 241:
             # Indexing with [..., catidx] ensures we get [1800] target responses
             targets = data.all_pred[..., catidx].flatten().to(me.device)
