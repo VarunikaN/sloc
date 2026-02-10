@@ -36,6 +36,8 @@ class ModelEnv:
                     else:
                         model.classifier = nn.Linear(model.classifier.in_features, 1)
 
+        model = timm.create_model(arch, pretrained=True, num_classes=241 if not self.regression else 1)
+    
         if weights_path and os.path.exists(weights_path):
             print(f"Loading weights from {weights_path}")
             model.load_state_dict(torch.load(weights_path, map_location=dev))
