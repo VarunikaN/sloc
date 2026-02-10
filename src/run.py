@@ -184,6 +184,8 @@ def main():
 
     # 1. Model Environment Setup
     me = ModelEnv(args.model)
+    
+    # Modify head to 241 classes first
     if hasattr(me.model, 'head'):
         me.model.head = torch.nn.Linear(me.model.head.in_features, 241)
     elif hasattr(me.model, 'fc'):
@@ -200,14 +202,25 @@ def main():
     for checkpoint_path in checkpoint_paths:
         if os.path.exists(checkpoint_path):
             print(f"Loading custom RSNA weights from {checkpoint_path}")
-            me.model.load_state_dict(torch.load(checkpoint_path, map_location=me.device))
-            me.model.to(me.device)
-            me.model.eval()
+            checkpoint = torch.load(checkpoint_path, map_location=me.device)
+            
+            # Use strict=False to allow partial loading and handle key mismatches
+            missing_keys, unexpected_keys = me.model.load_state_dict(checkpoint, strict=False)
+            
+            if missing_keys:
+                print(f"Warning: Missing keys: {missing_keys}")
+            if unexpected_keys:
+                print(f"Warning: Unexpected keys: {unexpected_keys}")
+            
             checkpoint_loaded = True
             break
     
     if not checkpoint_loaded:
         print(f"CRITICAL: {args.model} checkpoint NOT found. Explaining pre-trained features instead.")
+    
+    # Move model to device and set to eval mode
+    me.model.to(me.device)
+    me.model.eval()
     
     # 2. Paper Calibration
     modern_archs = ['vit', 'swin', 'convnext', 'dual']
