@@ -167,7 +167,20 @@ def main():
 
     # 1. Model Environment Setup
     me = ModelEnv(args.model)
-    print(f"GPU CHECK: Model {args.model} is running on: {me.device}")
+    if hasattr(me.model, 'head'):
+        me.model.head = torch.nn.Linear(me.model.head.in_features, 241)
+    elif hasattr(me.model, 'fc'):
+        me.model.fc = torch.nn.Linear(me.model.fc.in_features, 241)
+
+    checkpoint_path = "/home/iiitdmk-drnagaraju/xai/sloc/models/vit_small_patch16_224_rsna_best.pth"
+    if os.path.exists(checkpoint_path):
+        print(f"Loading custom RSNA weights from {checkpoint_path}")
+        me.model.load_state_dict(torch.load(checkpoint_path, map_location=me.device))
+        me.model.to(me.device)
+        me.model.eval()
+    else:
+        print(f"CRITICAL: Checkpoint NOT found at {checkpoint_path}")
+    
     
     # 2. Paper Calibration (Section 4.1)
     modern_archs = ['vit', 'swin', 'convnext', 'dual']
