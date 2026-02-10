@@ -128,34 +128,29 @@ class SlocM_Creator(SlocExplanationCreator):
         return final_explanation
 
     def optimize_with_logs(self, me, inp, initial, data, image_id, catidx):
-        # Ensure initial attribution map is on the GPU
+        # 1. Force the initial attribution map onto the specific GPU (cuda:0)
         initial = initial.to(me.device) 
+        
+        # 2. Move the explanation module to the GPU
         mexp = MaskedExplanationSum(initial_value=initial, H=me.shape[0], W=me.shape[1]).to(me.device)
         
         optimizer = optim.Adam(mexp.parameters(), lr=0.1)
-        # PAPER ALIGNMENT: 50-step decay for soft local completeness updates [cite: 221]
         scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.5)
         tv = TotalVariationLoss()
-        masks = data.all_masks.to(me.device)
-        if data.all_pred.numel() == masks.shape[0] * 241:
-            targets = data.all_pred.view(masks.shape[0], 241)[:, catidx].to(me.device)
-        else:
-            targets = data.all_pred.flatten().to(me.device)
-
-        masks = data.all_masks.to(me.device)
         
+        # 3. Ensure targets and masks are on the GPU BEFORE the loop starts
+        targets = data.all_pred.flatten().to(me.device) 
+        masks = data.all_masks.to(me.device)
+
         for epoch in range(501):
             optimizer.zero_grad()
-            # Forward pass: Attribution sum per sub-map
-            output = mexp(masks) # Shape [1800]
             
-            # Equation 2: Completeness Gap for target class y [cite: 151]
-            # Both tensors are now size [1800]
+            # Forward pass: All tensors are now guaranteed to be on me.device
+            output = mexp(masks) 
+            
             comp_loss = ((output - targets) ** 2).mean() 
-            
-            # Equation 4: Regularization [cite: 209]
-            tv_loss = 0.05 * tv(mexp.explanation) # Lambda 2
-            mag_loss = 0.01 * mexp.explanation.abs().mean() # Lambda 1
+            tv_loss = 0.05 * tv(mexp.explanation)
+            mag_loss = 0.01 * mexp.explanation.abs().mean()
             
             total_loss = comp_loss + tv_loss + mag_loss
             total_loss.backward()
@@ -165,7 +160,7 @@ class SlocM_Creator(SlocExplanationCreator):
             if epoch % 100 == 0 or epoch == 500:
                 self.epoch_logger.log(image_id, epoch, total_loss.item(), 
                                       comp_loss.item(), tv_loss.item(), mag_loss.item())
-        
+                                      
         return mexp.explanation.detach().cpu().numpy()
 
 # --- 3. Main Execution Block ---
@@ -187,15 +182,17 @@ def main():
     elif hasattr(me.model, 'fc'):
         me.model.fc = torch.nn.Linear(me.model.fc.in_features, 241)
 
-    checkpoint_path = "/kaggle/working/sloc/models/vit_small_patch16_224_rsna_best.pth"
+    # Dynamic path based on the --model argument
+    checkpoint_path = f"/kaggle/working/models/{args.model}_rsna_best.pth"
+    
     if os.path.exists(checkpoint_path):
         print(f"Loading custom RSNA weights from {checkpoint_path}")
         me.model.load_state_dict(torch.load(checkpoint_path, map_location=me.device))
         me.model.to(me.device)
         me.model.eval()
     else:
-        print(f"CRITICAL: Checkpoint NOT found at {checkpoint_path}")
-    
+        # If the file isn't there, the SLOC metrics will be based on ImageNet weights!
+        print(f"CRITICAL: {args.model} checkpoint NOT found. Explaining pre-trained features instead.")
     
     # 2. Paper Calibration (Section 4.1)
     modern_archs = ['vit', 'swin', 'convnext', 'dual']
