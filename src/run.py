@@ -74,7 +74,7 @@ class ModelOutputNormalizer:
         if self._is_spatial_output is None:
             if len(out.shape) == 4:  # [B, H, W, C] - Swin format
                 self._is_spatial_output = True
-                print(f"DEBUG: Detected spatial output {out.shape}. Will pool to [B, C]")
+                # print(f"DEBUG: Detected spatial output {out.shape}. Will pool to [B, C]")
             elif len(out.shape) == 2:  # [B, C] - Standard format
                 self._is_spatial_output = False
                 print(f"DEBUG: Detected standard output {out.shape}")
