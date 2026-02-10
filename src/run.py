@@ -178,7 +178,7 @@ def main():
     elif hasattr(me.model, 'fc'):
         me.model.fc = torch.nn.Linear(me.model.fc.in_features, 241)
 
-    checkpoint_path = "/kaggle/working/models/vit_small_patch16_224_rsna_best.pth"
+    checkpoint_path = "/kaggle/working/sloc/models/vit_small_patch16_224_rsna_best.pth"
     if os.path.exists(checkpoint_path):
         print(f"Loading custom RSNA weights from {checkpoint_path}")
         me.model.load_state_dict(torch.load(checkpoint_path, map_location=me.device))
