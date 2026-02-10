@@ -127,20 +127,24 @@ class SlocM_Creator(SlocExplanationCreator):
         self.epoch_logger.save_to_disk()
         return final_explanation
 
+    # --- Updated SlocM_Creator.optimize_with_logs inside run.py ---
     def optimize_with_logs(self, me, inp, initial, data, image_id, catidx):
+        # FIX: Ensure initial tensor is on the correct device (cuda:0)
+        initial = initial.to(me.device) 
+        
         mexp = MaskedExplanationSum(initial_value=initial, H=me.shape[0], W=me.shape[1]).to(me.device)
         optimizer = optim.Adam(mexp.parameters(), lr=0.1)
         scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.5)
         tv = TotalVariationLoss()
         
-        # CRITICAL FIX: Ensure targets is a flat 1D tensor [1800]
-        targets = data.all_pred.flatten() 
+        # Ensure targets are on the same device as the model output
+        targets = data.all_pred.flatten().to(me.device) 
 
         for epoch in range(501):
             optimizer.zero_grad()
-            output = mexp(data.all_masks) # This is [1800]
+            # data.all_masks must also be on me.device
+            output = mexp(data.all_masks.to(me.device)) 
             
-            # Now [1800] matches [1800]
             comp_loss = ((output - targets) ** 2).mean() 
             tv_loss = 0.05 * tv(mexp.explanation)
             mag_loss = 0.01 * mexp.explanation.abs().mean()
