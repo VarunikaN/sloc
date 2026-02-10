@@ -128,48 +128,40 @@ class SlocM_Creator(SlocExplanationCreator):
         return final_explanation
 
     def optimize_with_logs(self, me, inp, initial, data, image_id, catidx):
-    # Ensure everything is on the same device to avoid previous CUDA errors
-        initial = initial.to(me.device)
+        # Ensure initial attribution map is on the GPU
+        initial = initial.to(me.device) 
         mexp = MaskedExplanationSum(initial_value=initial, H=me.shape[0], W=me.shape[1]).to(me.device)
+        
         optimizer = optim.Adam(mexp.parameters(), lr=0.1)
+        # PAPER ALIGNMENT: 50-step decay for soft local completeness updates [cite: 221]
         scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.5)
         tv = TotalVariationLoss()
         
-        # FIX: Narrow model responses to ONLY the target class (catidx)
-        # data.all_pred typically has shape [N_masks, N_classes]
-        # We need shape [N_masks] to match the attribution sums
-        if len(data.all_pred.shape) > 1:
-            targets = data.all_pred[:, catidx].flatten().to(me.device)
+        # --- CRITICAL FIX START ---
+        # data.all_pred has shape [1800, 241] or [1800, 1, 1]
+        # We MUST extract only the value for catidx (the target age)
+        if len(data.all_pred.shape) > 1 and data.all_pred.shape[-1] == 241:
+            # Indexing with [..., catidx] ensures we get [1800] target responses
+            targets = data.all_pred[..., catidx].flatten().to(me.device)
         else:
             targets = data.all_pred.flatten().to(me.device)
-
+        
+        # Pre-move masks to GPU for Eq 2 efficiency
         masks = data.all_masks.to(me.device)
-        # --- DEBUG BLOCK: Add this inside optimize_with_logs ---
-        print(f"DEBUG: Initial Map Shape: {initial.shape}") # Should be [224, 224]
-        print(f"DEBUG: Masks Shape: {data.all_masks.shape}") # Should be [1800, 224, 224]
-        print(f"DEBUG: Raw Preds Shape: {data.all_pred.shape}") # Check if this is [1800, 241] or [1800, 1, 1]
-
-        if len(data.all_pred.shape) > 1 and data.all_pred.shape[1] == 241:
-            print(f"DEBUG: Narrowing predictions to target class index: {catidx}")
-            targets = data.all_pred[:, catidx].flatten().to(me.device)
-        else:
-            targets = data.all_pred.flatten().to(me.device)
-
-        print(f"DEBUG: Final Target Shape for Loss: {targets.shape}") # MUST be [1800]
-# ------------------------------------------------------
+        # --- CRITICAL FIX END ---
 
         for epoch in range(501):
             optimizer.zero_grad()
-            # output will be shape [N_masks]
-            output = mexp(masks) 
+            # Forward pass: Attribution sum per sub-map
+            output = mexp(masks) # Shape [1800]
             
-            # Equation 2: Minimizing the completeness gap for the target class
-            # Both tensors are now size [1800], resolving the mismatch
+            # Equation 2: Completeness Gap for target class y [cite: 151]
+            # Both tensors are now size [1800]
             comp_loss = ((output - targets) ** 2).mean() 
             
-            # Equation 4: Standard SLOC Regularization
-            tv_loss = 0.05 * tv(mexp.explanation)
-            mag_loss = 0.01 * mexp.explanation.abs().mean()
+            # Equation 4: Regularization [cite: 209]
+            tv_loss = 0.05 * tv(mexp.explanation) # Lambda 2
+            mag_loss = 0.01 * mexp.explanation.abs().mean() # Lambda 1
             
             total_loss = comp_loss + tv_loss + mag_loss
             total_loss.backward()
@@ -179,7 +171,9 @@ class SlocM_Creator(SlocExplanationCreator):
             if epoch % 100 == 0 or epoch == 500:
                 self.epoch_logger.log(image_id, epoch, total_loss.item(), 
                                       comp_loss.item(), tv_loss.item(), mag_loss.item())
+        
         return mexp.explanation.detach().cpu().numpy()
+
 # --- 3. Main Execution Block ---
 def main():
     parser = argparse.ArgumentParser(description="Run SLOC Benchmark on Full RSNA Bone Age Split.")
