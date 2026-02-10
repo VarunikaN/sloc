@@ -207,8 +207,8 @@ def main():
         print(f"Loading custom RSNA weights from {checkpoint_path}")
         
         # Debug: Print checkpoint keys to understand structure
-        head_keys = [k for k in checkpoint.keys() if 'head' in k or 'fc' in k]
-        print(f"DEBUG: Head/FC keys in checkpoint: {head_keys}")
+        head_keys = [k for k in checkpoint.keys() if 'head' in k or (k.startswith('fc.') and not 'mlp' in k)]
+        print(f"DEBUG: Head/FC keys in checkpoint: {head_keys[:5]}..." if len(head_keys) > 5 else f"DEBUG: Head/FC keys: {head_keys}")
         
         # Detect checkpoint structure
         has_head_fc = any('head.fc.' in k for k in checkpoint.keys())
@@ -226,7 +226,7 @@ def main():
                     def forward(self, x):
                         return self.fc(x)
                 
-                me.model.head = HeadWithFC(in_features, 241).to(me.device)  # ← ADD .to(me.device) HERE
+                me.model.head = HeadWithFC(in_features, 241).to(me.device)
                 print(f"DEBUG: Created HeadWithFC structure with {in_features} -> 241")
         else:
             # Standard structure (ResNet or simple ViT)
@@ -235,16 +235,34 @@ def main():
                 me.model.head = torch.nn.Linear(me.model.head.in_features, 241)
             elif hasattr(me.model, 'fc'):
                 me.model.fc = torch.nn.Linear(me.model.fc.in_features, 241)
-
+        
+        # Move model to device BEFORE loading checkpoint
+        me.model.to(me.device)
+        
         # Now load the checkpoint
         missing_keys, unexpected_keys = me.model.load_state_dict(checkpoint, strict=False)
-
+        
         if missing_keys:
             print(f"Warning: Missing keys: {missing_keys}")
         if unexpected_keys:
             print(f"Warning: Unexpected keys: {unexpected_keys}")
-
-    me.model.to(me.device)
+        
+        # Verify the model output shape
+        test_input = torch.randn(1, 3, 224, 224).to(me.device)
+        with torch.no_grad():
+            test_output = me.model(test_input)
+        print(f"DEBUG: Model output shape: {test_output.shape} (expected: [1, 241])")
+        
+    else:
+        print(f"CRITICAL: {args.model} checkpoint NOT found. Explaining pre-trained features instead.")
+        # Modify head to 241 classes for pretrained models
+        if hasattr(me.model, 'head'):
+            me.model.head = torch.nn.Linear(me.model.head.in_features, 241)
+        elif hasattr(me.model, 'fc'):
+            me.model.fc = torch.nn.Linear(me.model.fc.in_features, 241)
+        me.model.to(me.device)
+    
+    # Set to eval mode
     me.model.eval()
     
     # 2. Paper Calibration
