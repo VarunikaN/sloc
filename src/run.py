@@ -120,45 +120,45 @@ class SlocM_Creator(SlocExplanationCreator):
     def explain(self, me, inp, catidx, image_id="unknown"):
         self.epoch_logger = EpochLogger(me.arch, "rsna_boneage")
         data = self.generate_data(me, inp, catidx)
-        # Initialization logic from paper [cite: 188]
-        initial = (torch.randn(me.shape[0], me.shape[1]) * 0.2 + 3).to(me.device)
-        
-        final_explanation = self.optimize_with_logs(me, inp, initial, data, image_id, catidx)
+        initial = (torch.randn(me.shape[0], me.shape[1]) * 0.2 + 3)
+        final_explanation = self.optimize_with_logs(
+            me, inp, initial, data, image_id, catidx
+        )
         self.epoch_logger.save_to_disk()
         return final_explanation
 
-    # --- Updated SlocM_Creator.optimize_with_logs inside run.py ---
     def optimize_with_logs(self, me, inp, initial, data, image_id, catidx):
-        # FIX: Ensure initial tensor is on the correct device (cuda:0)
         initial = initial.to(me.device) 
-        
+
         mexp = MaskedExplanationSum(initial_value=initial, H=me.shape[0], W=me.shape[1]).to(me.device)
         optimizer = optim.Adam(mexp.parameters(), lr=0.1)
         scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.5)
         tv = TotalVariationLoss()
         
-        # Ensure targets are on the same device as the model output
         targets = data.all_pred.flatten().to(me.device) 
+        masks = data.all_masks.to(me.device)
 
         for epoch in range(501):
             optimizer.zero_grad()
-            # data.all_masks must also be on me.device
-            output = mexp(data.all_masks.to(me.device)) 
-            
+            output = mexp(masks) 
             comp_loss = ((output - targets) ** 2).mean() 
-            tv_loss = 0.05 * tv(mexp.explanation)
-            mag_loss = 0.01 * mexp.explanation.abs().mean()
+            tv_loss = 0.05 * tv(mexp.explanation) # Lambda 2 = 0.05
+            mag_loss = 0.01 * mexp.explanation.abs().mean() # Lambda 1 = 0.01
             
             total_loss = comp_loss + tv_loss + mag_loss
             total_loss.backward()
             optimizer.step()
             scheduler.step()
 
+            # Logging for convergence analysis
             if epoch % 100 == 0 or epoch == 500:
-                self.epoch_logger.log(image_id, epoch, total_loss.item(), 
-                                      comp_loss.item(), tv_loss.item(), mag_loss.item())
+                self.epoch_logger.log(
+                    image_id, epoch, total_loss.item(), 
+                    comp_loss.item(), tv_loss.item(), mag_loss.item()
+                )
+        
+        # Detach and move final map back to CPU for evaluation and saving
         return mexp.explanation.detach().cpu().numpy()
-
 # --- 3. Main Execution Block ---
 def main():
     parser = argparse.ArgumentParser(description="Run SLOC Benchmark on Full RSNA Bone Age Split.")
@@ -178,7 +178,7 @@ def main():
     elif hasattr(me.model, 'fc'):
         me.model.fc = torch.nn.Linear(me.model.fc.in_features, 241)
 
-    checkpoint_path = "/kaggle/working/sloc/models/vit_small_patch16_224_rsna_best.pth"
+    checkpoint_path = "/kaggle/working/models/vit_small_patch16_224_rsna_best.pth"
     if os.path.exists(checkpoint_path):
         print(f"Loading custom RSNA weights from {checkpoint_path}")
         me.model.load_state_dict(torch.load(checkpoint_path, map_location=me.device))
