@@ -128,36 +128,44 @@ class SlocM_Creator(SlocExplanationCreator):
         return final_explanation
 
     def optimize_with_logs(self, me, inp, initial, data, image_id, catidx):
-        initial = initial.to(me.device) 
-
+    # Ensure everything is on the same device to avoid previous CUDA errors
+        initial = initial.to(me.device)
         mexp = MaskedExplanationSum(initial_value=initial, H=me.shape[0], W=me.shape[1]).to(me.device)
         optimizer = optim.Adam(mexp.parameters(), lr=0.1)
         scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.5)
         tv = TotalVariationLoss()
         
-        targets = data.all_pred.flatten().to(me.device) 
+        # FIX: Narrow model responses to ONLY the target class (catidx)
+        # data.all_pred typically has shape [N_masks, N_classes]
+        # We need shape [N_masks] to match the attribution sums
+        if len(data.all_pred.shape) > 1:
+            targets = data.all_pred[:, catidx].flatten().to(me.device)
+        else:
+            targets = data.all_pred.flatten().to(me.device)
+
         masks = data.all_masks.to(me.device)
 
         for epoch in range(501):
             optimizer.zero_grad()
+            # output will be shape [N_masks]
             output = mexp(masks) 
+            
+            # Equation 2: Minimizing the completeness gap for the target class
+            # Both tensors are now size [1800], resolving the mismatch
             comp_loss = ((output - targets) ** 2).mean() 
-            tv_loss = 0.05 * tv(mexp.explanation) # Lambda 2 = 0.05
-            mag_loss = 0.01 * mexp.explanation.abs().mean() # Lambda 1 = 0.01
+            
+            # Equation 4: Standard SLOC Regularization
+            tv_loss = 0.05 * tv(mexp.explanation)
+            mag_loss = 0.01 * mexp.explanation.abs().mean()
             
             total_loss = comp_loss + tv_loss + mag_loss
             total_loss.backward()
             optimizer.step()
             scheduler.step()
 
-            # Logging for convergence analysis
             if epoch % 100 == 0 or epoch == 500:
-                self.epoch_logger.log(
-                    image_id, epoch, total_loss.item(), 
-                    comp_loss.item(), tv_loss.item(), mag_loss.item()
-                )
-        
-        # Detach and move final map back to CPU for evaluation and saving
+                self.epoch_logger.log(image_id, epoch, total_loss.item(), 
+                                      comp_loss.item(), tv_loss.item(), mag_loss.item())
         return mexp.explanation.detach().cpu().numpy()
 # --- 3. Main Execution Block ---
 def main():
