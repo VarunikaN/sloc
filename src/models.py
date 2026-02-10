@@ -22,19 +22,19 @@ class ModelEnv:
         # Load the base architecture
         if self.regression:
         # Replace the classification layer with a single output for age
-        if 'vit' in arch or 'swin' in arch or 'convnext' in arch:
-            model = timm.create_model(arch, pretrained=True, num_classes=1)
-        else:
-            model = torchvision.models.__dict__[arch](weights='DEFAULT')
-            if hasattr(model, 'fc'):
-                model.fc = nn.Linear(model.fc.in_features, 1)
-            elif hasattr(model, 'classifier'):
-                # Handle VGG/DenseNet style classifiers
-                if isinstance(model.classifier, nn.Sequential):
-                    in_features = model.classifier[-1].in_features
-                    model.classifier[-1] = nn.Linear(in_features, 1)
-                else:
-                    model.classifier = nn.Linear(model.classifier.in_features, 1)
+            if 'vit' in arch or 'swin' in arch or 'convnext' in arch:
+                model = timm.create_model(arch, pretrained=True, num_classes=1)
+            else:
+                model = torchvision.models.__dict__[arch](weights='DEFAULT')
+                if hasattr(model, 'fc'):
+                    model.fc = nn.Linear(model.fc.in_features, 1)
+                elif hasattr(model, 'classifier'):
+                    # Handle VGG/DenseNet style classifiers
+                    if isinstance(model.classifier, nn.Sequential):
+                        in_features = model.classifier[-1].in_features
+                        model.classifier[-1] = nn.Linear(in_features, 1)
+                    else:
+                        model.classifier = nn.Linear(model.classifier.in_features, 1)
 
         if weights_path and os.path.exists(weights_path):
             print(f"Loading weights from {weights_path}")
