@@ -642,33 +642,37 @@ class SlocExplanationCreator:
 
         
         rfactor = inp.numel()        
-        baseline_score = fmdl(baseline).detach().squeeze()
-        label_score = fmdl(inp).detach().squeeze()
+        baseline_score = fmdl(baseline).detach().view(-1)[0] # Force scalar
+        label_score = fmdl(inp).detach().view(-1)[0]           # Force scalar
 
         device = me.device
+        rfactor = inp.numel()
 
+        # Updated norm function to handle scalar subtraction correctly
         if logit:
             norm = lambda x: (torch.logit(x) + torch.log((1-baseline_score)/baseline_score)) * rfactor
         elif self.cap_response:
             norm = lambda x: torch.maximum((x - baseline_score), torch.zeros(1).to(device)) * rfactor
         else:
             norm = lambda x: (x - baseline_score) * rfactor
-                
-        added_score = norm(label_score)
+
         all_masks = torch.concat(all_masks_list).to(device)
         
-        all_pred = norm(torch.concat(all_pred_list).to(device).squeeze())
-        all_pred.shape, baseline_score.shape
+        # FIX: Ensure all_pred_list tensors are narrowed to scalars before concat
+        # If all_pred_list contains [Batch, 241], we need to index them
+        raw_preds = torch.concat(all_pred_list).to(device)
+        if len(raw_preds.shape) > 1 and raw_preds.shape[-1] == 241:
+            raw_preds = raw_preds[:, catidx] # Extract target class
+    
+        all_pred = norm(raw_preds.flatten()) # Result: [1800]
         
-        #print("MaskGeneration,{self.segsize},{duration},")
         return MaskedRespData(
-            baseline_score = baseline_score,
-            label_score = label_score,
-            added_score = added_score,
-            all_masks = all_masks,
-            all_pred = all_pred,
-            all_pred_raw = (torch.concat(all_pred_list).to(device).squeeze()),
-            baseline = baseline
+            baseline_score=baseline_score,
+            label_score=label_score,
+            added_score=norm(label_score),
+            all_masks=all_masks,
+            all_pred=all_pred,
+            baseline=baseline
         )
 
     def explain(self, me, inp, catidx, data=None, initial=None, callback=None):
