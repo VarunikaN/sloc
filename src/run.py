@@ -137,18 +137,13 @@ class SlocM_Creator(SlocExplanationCreator):
         scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.5)
         tv = TotalVariationLoss()
         
-        print(f"DEBUG: data.all_pred.shape = {data.all_pred.shape}")
-        print(f"DEBUG: catidx = {catidx}, type = {type(catidx)}")
-        if len(data.all_pred.shape) > 1 and data.all_pred.shape[-1] == 241:
-            # Indexing with [..., catidx] ensures we get [1800] target responses
-            targets = data.all_pred[..., catidx].flatten().to(me.device)
+        if data.all_pred.numel() == masks.shape[0] * 241:
+            targets = data.all_pred.view(masks.shape[0], 241)[:, catidx].to(me.device)
         else:
             targets = data.all_pred.flatten().to(me.device)
-        
-        # Pre-move masks to GPU for Eq 2 efficiency
-        masks = data.all_masks.to(me.device)
-        # --- CRITICAL FIX END ---
 
+        masks = data.all_masks.to(me.device)
+        
         for epoch in range(501):
             optimizer.zero_grad()
             # Forward pass: Attribution sum per sub-map
