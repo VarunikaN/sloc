@@ -20,9 +20,6 @@ repo_path = "/home/iiitdmk-drnagaraju/xai/sloc"
 src_path = os.path.join(repo_path, "src")
 if src_path not in sys.path: sys.path.insert(0, src_path)
 
-from models import ModelEnv
-from sloc import SlocExplanationCreator, AutoProbSlocExplanationCreator, MaskedExplanationSum, TotalVariationLoss
-from visutils import showsal
 
 # --- Helper Functions (Moved to Top Level for Scope Fix) ---
 def get_voc_val_images(voc_root):
