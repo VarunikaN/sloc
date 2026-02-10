@@ -101,14 +101,13 @@ class MaskedRespGen:
         self.all_pred = []
         self.num_masks = 0
 
+    # Inside MaskedRespGen class in sloc.py
     def gen_(self, model, inp, itr=125, batch_size=32):
-        
-        h = self.ishape[0]
-        w = self.ishape[1]
-        
-        baseline = self.baseline.to(inp.device)
-        
-        for idx in tqdm(range(itr)):            
+       h = self.ishape[0]
+       w = self.ishape[1]
+       baseline = self.baseline.to(inp.device)
+    
+        for idx in tqdm(range(itr)):                
             masks = self.mgen.gen_masks(batch_size)
             is_valid = (masks.flatten(start_dim=1).sum(dim=1) > 0)
             
@@ -118,11 +117,19 @@ class MaskedRespGen:
             dmasks = masks.to(inp.device).float()
 
             pert_inp = inp * dmasks.unsqueeze(1) + baseline * (1.0-dmasks.unsqueeze(1))
-            out = model(pert_inp) 
-            mout = out.unsqueeze(-1).unsqueeze(-1)
             
+            # model(pert_inp) returns [Batch, 241]
+            # BUT me.narrow_model() was already used in generate_data()!
+            # me.narrow_model() adds SelectKthLogit, so out should already be [Batch, 1]
+            out = model(pert_inp) 
+            
+            # CRITICAL FIX: Ensure we have a 1D tensor of shape [Batch]
+            # If out is [Batch, 1, 1, 1], we must squeeze it to [Batch]
+            out_flat = out.view(-1) 
+
             self.all_masks.append(masks.cpu())
-            self.all_pred.append(mout.cpu())
+            # Store as [Batch, 1, 1] to match expected formatting in later steps
+            self.all_pred.append(out_flat.unsqueeze(-1).unsqueeze(-1).cpu())
             self.num_masks += int(is_valid.sum())
 
 
