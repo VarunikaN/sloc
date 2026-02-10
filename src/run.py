@@ -136,7 +136,7 @@ class SlocM_Creator(SlocExplanationCreator):
         # PAPER ALIGNMENT: 50-step decay for soft local completeness updates [cite: 221]
         scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.5)
         tv = TotalVariationLoss()
-        
+        masks = data.all_masks.to(me.device)
         if data.all_pred.numel() == masks.shape[0] * 241:
             targets = data.all_pred.view(masks.shape[0], 241)[:, catidx].to(me.device)
         else:
