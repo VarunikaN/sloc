@@ -103,9 +103,9 @@ class MaskedRespGen:
 
     # Inside MaskedRespGen class in sloc.py
     def gen_(self, model, inp, itr=125, batch_size=32):
-       h = self.ishape[0]
-       w = self.ishape[1]
-       baseline = self.baseline.to(inp.device)
+        h = self.ishape[0]
+        w = self.ishape[1]
+        baseline = self.baseline.to(inp.device)
     
         for idx in tqdm(range(itr)):                
             masks = self.mgen.gen_masks(batch_size)
