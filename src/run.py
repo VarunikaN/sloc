@@ -149,12 +149,11 @@ class SlocM_Creator(SlocExplanationCreator):
         print(f"DEBUG: Masks Shape: {data.all_masks.shape}") # Should be [1800, 224, 224]
         print(f"DEBUG: Raw Preds Shape: {data.all_pred.shape}") # Check if this is [1800, 241] or [1800, 1, 1]
 
-# This line ensures we only take the probabilities for our target age group
         if len(data.all_pred.shape) > 1 and data.all_pred.shape[1] == 241:
-        print(f"DEBUG: Narrowing predictions to target class index: {catidx}")
-        targets = data.all_pred[:, catidx].flatten().to(me.device)
+            print(f"DEBUG: Narrowing predictions to target class index: {catidx}")
+            targets = data.all_pred[:, catidx].flatten().to(me.device)
         else:
-        targets = data.all_pred.flatten().to(me.device)
+            targets = data.all_pred.flatten().to(me.device)
 
         print(f"DEBUG: Final Target Shape for Loss: {targets.shape}") # MUST be [1800]
 # ------------------------------------------------------
