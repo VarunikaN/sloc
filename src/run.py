@@ -58,11 +58,46 @@ class EpochLogger:
         df.to_csv(self.filename, mode='a', header=not os.path.exists(self.filename), index=False)
         self.data = []
 
+
+# --- Helper: Model Output Normalizer ---
+class ModelOutputNormalizer:
+    """Wraps model to ensure consistent [batch, classes] output across architectures."""
+    def __init__(self, model, device):
+        self.model = model
+        self.device = device
+        self._is_spatial_output = None
+        
+    def __call__(self, x):
+        out = self.model(x)
+        
+        # Auto-detect spatial output on first call
+        if self._is_spatial_output is None:
+            if len(out.shape) == 4:  # [B, H, W, C] - Swin format
+                self._is_spatial_output = True
+                print(f"DEBUG: Detected spatial output {out.shape}. Will pool to [B, C]")
+            elif len(out.shape) == 2:  # [B, C] - Standard format
+                self._is_spatial_output = False
+                print(f"DEBUG: Detected standard output {out.shape}")
+            else:
+                raise ValueError(f"Unexpected model output shape: {out.shape}")
+        
+        # Normalize to [B, C] if needed
+        if self._is_spatial_output:
+            # Global average pooling over spatial dimensions for Swin
+            out = out.mean(dim=[1, 2])  # [B, H, W, C] -> [B, C]
+        
+        return out
+    
+    def eval(self):
+        self.model.eval()
+        return self
+
       
 # --- 1. Metric Evaluator (All 8 Metrics) ---
 class SLOCPaperEvaluator:
     def __init__(self, model, device):
-        self.model, self.device = model, device
+        self.model = ModelOutputNormalizer(model, device)
+        self.device = device
 
     def run(self, img_tensor, sal_map, target_idx, steps=50):
         self.model.eval()
@@ -114,9 +149,23 @@ class SLOCPaperEvaluator:
 
 # --- 2. SLOC_m Creator ---
 class SlocM_Creator(SlocExplanationCreator):
+    def __init__(self, model_wrapper, **kwargs):
+        """Initialize with model wrapper for consistent outputs."""
+        super().__init__(**kwargs)
+        self.model_wrapper = model_wrapper
+        
     def explain(self, me, inp, catidx, image_id="unknown"):
         self.epoch_logger = EpochLogger(me.arch, "rsna_boneage")
+        
+        # Use wrapped model for data generation
+        original_model = me.model
+        me.model = self.model_wrapper
+        
         data = self.generate_data(me, inp, catidx)
+        
+        # Restore original model
+        me.model = original_model
+        
         initial = (torch.randn(me.shape[0], me.shape[1]) * 0.2 + 3)
         final_explanation = self.optimize_with_logs(
             me, inp, initial, data, image_id, catidx
@@ -251,7 +300,7 @@ def main():
         test_input = torch.randn(1, 3, 224, 224).to(me.device)
         with torch.no_grad():
             test_output = me.model(test_input)
-        print(f"DEBUG: Model output shape: {test_output.shape} (expected: [1, 241])")
+        print(f"DEBUG: Raw model output shape: {test_output.shape}")
         
     else:
         print(f"CRITICAL: {args.model} checkpoint NOT found. Explaining pre-trained features instead.")
@@ -265,14 +314,17 @@ def main():
     # Set to eval mode
     me.model.eval()
     
+    # Create normalized model wrapper for all operations
+    model_wrapper = ModelOutputNormalizer(me.model, me.device)
+    
     # 2. Paper Calibration
     modern_archs = ['vit', 'swin', 'convnext', 'dual']
     p = 0.3 if any(arch in args.model.lower() for arch in modern_archs) else 0.6
     config = {'segsize': [16, 32, 48], 'nmasks': [800, 600, 400], 'pprob': [p]*3}
 
-    # 3. Creator Selection
+    # 3. Creator Selection - Pass model wrapper to SLOC_m
     if args.variant == 'SLOC_m': 
-        creator = SlocM_Creator(**config)
+        creator = SlocM_Creator(model_wrapper=model_wrapper, **config)
     elif args.variant == 'SLOC_xp': 
         creator = SlocExplanationCreator(**config)
     else: 
@@ -330,13 +382,15 @@ def main():
             else:
                 img_pil, inp = me.get_image_ext(info.path)
             
-            logits = me.model(inp)
+            # Use wrapped model for prediction to get consistent output
+            logits = model_wrapper(inp)
             target = torch.argmax(logits).item()
             
             sal_numpy = creator.explain(me, inp, target, image_id=image_name)
             visual_path = os.path.join(visuals_dir, f"{image_name}.png")
             save_visual_result(img_pil, sal_numpy, visual_path)
             
+            # Use original model (wrapped internally) for evaluation
             m = SLOCPaperEvaluator(me.model, me.device).run(inp, sal_numpy, target, steps=50)
             
             m['Image'] = image_name
@@ -353,6 +407,8 @@ def main():
 
         except Exception as e:
             print(f"FAILED for {image_name}: {e}")
+            import traceback
+            traceback.print_exc()
 
     print(f"\nBenchmark Complete. Total Time: {(time.time()-start_time)/3600:.2f} hours")
 
