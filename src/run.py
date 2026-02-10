@@ -130,17 +130,19 @@ class SlocM_Creator(SlocExplanationCreator):
     def optimize_with_logs(self, me, inp, initial, data, image_id, catidx):
         # 1. Force the initial attribution map onto the specific GPU (cuda:0)
         initial = initial.to(me.device) 
-        
-        # 2. Move the explanation module to the GPU
         mexp = MaskedExplanationSum(initial_value=initial, H=me.shape[0], W=me.shape[1]).to(me.device)
         
         optimizer = optim.Adam(mexp.parameters(), lr=0.1)
         scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.5)
         tv = TotalVariationLoss()
         
-        # 3. Ensure targets and masks are on the GPU BEFORE the loop starts
-        targets = data.all_pred.flatten().to(me.device) 
         masks = data.all_masks.to(me.device)
+        if data.all_pred.numel() == masks.shape[0] * 241:
+        # Classification: reshape [433800] -> [1800, 241], extract target class
+            targets = data.all_pred.view(masks.shape[0], 241)[:, catidx].to(me.device)
+        else:
+            # Regression or already correct shape
+            targets = data.all_pred.flatten().to(me.device)
 
         for epoch in range(501):
             optimizer.zero_grad()
