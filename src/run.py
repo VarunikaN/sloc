@@ -199,7 +199,7 @@ def main():
 
     # 4. Dataset Loading (Using full split based on local path)
     if args.dataset == 'rsna_boneage':
-        BONEAGE_ROOT = "/kaggle/input/rsnadata/RSNA_original14236_images"
+        BONEAGE_ROOT = "/kaggle/working/rsnadata/RSNA_original14236_images"
         from dataset import RSNABoneAgeSource, load_boneage_as_pil
         
         source = RSNABoneAgeSource(BONEAGE_ROOT, split=args.split)
