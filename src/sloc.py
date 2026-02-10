@@ -634,45 +634,48 @@ class SlocExplanationCreator:
         parts = list(zip(self.segsize, self.nmasks, self.pprob))
         for segsize, nmasks, pprob  in parts:
             mgen = MaskedRespGen(segsize, mgen=self.mgen, baseline=baseline, ishape=me.shape, prob=pprob)            
-            logging.debug(f"generating {nmasks} masks and responses")            
             mgen.gen(fmdl, inp, nmasks, batch_size=self.batch_size)        
             all_masks_list += mgen.all_masks
             all_pred_list += mgen.all_pred
-        logging.debug("Done generating masks")
 
-        
         rfactor = inp.numel()        
-        baseline_score = fmdl(baseline).detach().view(-1)[0] # Force scalar
-        label_score = fmdl(inp).detach().view(-1)[0]           # Force scalar
+        baseline_score = fmdl(baseline).detach().squeeze()
+        label_score = fmdl(inp).detach().squeeze()
+
+        # FIX: Ensure baseline and label scores are scalar values
+        if baseline_score.dim() > 0: baseline_score = baseline_score.flatten()[0]
+        if label_score.dim() > 0: label_score = label_score.flatten()[0]
 
         device = me.device
-        rfactor = inp.numel()
 
-        # Updated norm function to handle scalar subtraction correctly
+        # Paper-aligned normalization
         if logit:
             norm = lambda x: (torch.logit(x) + torch.log((1-baseline_score)/baseline_score)) * rfactor
         elif self.cap_response:
             norm = lambda x: torch.maximum((x - baseline_score), torch.zeros(1).to(device)) * rfactor
         else:
             norm = lambda x: (x - baseline_score) * rfactor
-
+                
+        added_score = norm(label_score)
         all_masks = torch.concat(all_masks_list).to(device)
         
-        # FIX: Ensure all_pred_list tensors are narrowed to scalars before concat
-        # If all_pred_list contains [Batch, 241], we need to index them
+        # --- THE BROADCASTING FIX ---
         raw_preds = torch.concat(all_pred_list).to(device)
+        
+        # If the model returned [1800, 241], we MUST pick the target class column
         if len(raw_preds.shape) > 1 and raw_preds.shape[-1] == 241:
-            raw_preds = raw_preds[:, catidx] # Extract target class
-    
-        all_pred = norm(raw_preds.flatten()) # Result: [1800]
+             raw_preds = raw_preds[:, catidx]
+        
+        # Final targets must be shape [1800]
+        all_pred = norm(raw_preds.flatten())
         
         return MaskedRespData(
-            baseline_score=baseline_score,
-            label_score=label_score,
-            added_score=norm(label_score),
-            all_masks=all_masks,
-            all_pred=all_pred,
-            baseline=baseline
+            baseline_score = baseline_score,
+            label_score = label_score,
+            added_score = added_score,
+            all_masks = all_masks,
+            all_pred = all_pred,
+            baseline = baseline
         )
 
     def explain(self, me, inp, catidx, data=None, initial=None, callback=None):
